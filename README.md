@@ -16,7 +16,7 @@ Use this repo as a template to deploy a Python FastAPI server over Render.
 
 1. Modify README's Deploy to Render Button to own repository URL.
 
-2. Set `OPENAI_API_KEY` in Render secrets.
+2. Set `API_KEY`s in Render secrets.
 
 3. Simply click:
 
