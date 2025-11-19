@@ -2,5 +2,8 @@ fastapi[standard]
 uvicorn
 openai
 pydantic
-numpy
 python-dotenv
+numpy
+requests
+beautifulsoup4
+lxml
