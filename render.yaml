@@ -1,7 +1,7 @@
 services:
   # A Docker web service
   - type: web
-    name: pycon-AI-messenger
+    name: kakao-solar-news-chatbot
     runtime: python
     plan: free
     autoDeploy: false
