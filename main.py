@@ -1,19 +1,259 @@
 import logging
 import os
+import asyncio
+from datetime import datetime
+from typing import Optional, Any
+import uuid
+from collections import deque
 
 from fastapi import FastAPI
-from openai import OpenAI, OpenAIError, APITimeoutError
 from pydantic import BaseModel
+from openai import OpenAI, OpenAIError, APITimeoutError
+import numpy as np
+import pickle
+import requests
+from bs4 import BeautifulSoup
 
-app = FastAPI()
 
-@app.get("/")
-def read_root():
-    return {"Hello": "World"}
+# Redis for queue management
+try:
+    import redis.asyncio as redis
+    from redis.asyncio import Redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
+    Redis = Any
+    logging.warning("redis package not installed. Using in-memory queue.")
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# ================================================================================
+# Logging Configuration
+# ================================================================================
 
-# Define Pydantic models for nested JSON structure
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(
+    title="REXA - Real Estate Expert Assistant",
+    description="Solar API + RAG chatbot for real estate",
+    version="1.0.0"
+)
+
+# ================================================================================
+# Configuration & Global Variables
+# ================================================================================
+
+# Redis Configuration
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+REDIS_DB = int(os.getenv("REDIS_DB", 0))
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
+
+# Health Check Configuration
+HEALTH_CHECK_INTERVAL = int(os.getenv("HEALTH_CHECK_INTERVAL", 5))
+MAX_UNHEALTHY_COUNT = int(os.getenv("MAX_UNHEALTHY_COUNT", 3))
+
+# Queue Configuration
+WEBHOOK_QUEUE_NAME = "rexa:webhook_queue"
+WEBHOOK_PROCESSING_QUEUE = "rexa:processing_queue"
+WEBHOOK_FAILED_QUEUE = "rexa:failed_queue"
+MAX_RETRY_ATTEMPTS = int(os.getenv("MAX_RETRY_ATTEMPTS", 3))
+QUEUE_PROCESS_INTERVAL = int(os.getenv("QUEUE_PROCESS_INTERVAL", 5))
+
+# API Timeout Configuration
+API_TIMEOUT = int(os.getenv("API_TIMEOUT", 3))
+
+# Global state
+redis_client: Optional[Any] = None
+server_healthy = True
+unhealthy_count = 0
+last_health_check = datetime.now()
+
+# In-memory queue fallback
+in_memory_webhook_queue: deque = deque()
+in_memory_processing_queue: deque = deque()
+in_memory_failed_queue: deque = deque()
+use_in_memory_queue = False
+
+# ================================================================================
+# Upstage Solar API Configuration
+# ================================================================================
+
+client = OpenAI(
+    api_key=os.getenv("UPSTAGE_API_KEY"),
+    base_url="https://api.upstage.ai/v1/solar",
+    timeout=API_TIMEOUT
+)
+
+logger.info("✅ Upstage Solar API client configured")
+
+# 네이버 뉴스 API 설정
+NAVER_CLIENT_ID = os.getenv("NAVER_CLIENT_ID")
+NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET")
+
+if NAVER_CLIENT_ID and NAVER_CLIENT_SECRET:
+    logger.info("✅ Naver News API configured")
+else:
+    logger.warning("⚠️ Naver News API not configured")
+    
+    
+# ================================================================================
+# RAG - Load Embeddings
+# ================================================================================
+
+article_chunks = []
+chunk_embeddings = []
+
+try:
+    with open("embeddings.pkl", "rb") as f:
+        data = pickle.load(f)
+        article_chunks = data["chunks"]
+        chunk_embeddings = data["embeddings"]
+    logger.info(f"✅ Loaded {len(article_chunks)} chunks from embeddings.pkl")
+    logger.info(f"✅ RAG is ENABLED with {len(article_chunks)} chunks")
+except FileNotFoundError:
+    logger.warning("⚠️ embeddings.pkl not found - RAG will not be available")
+    logger.warning("⚠️ Server will continue WITHOUT RAG - responses will be general")
+    logger.warning("⚠️ To enable RAG: run 'python embedding2_solar.py' and redeploy")
+except Exception as e:
+    logger.error(f"❌ Failed to load embeddings: {e}")
+    logger.warning("⚠️ Server will continue WITHOUT RAG")
+
+# ================================================================================
+# RAG Helper Functions
+# ================================================================================
+
+def cosine_similarity(a, b):
+    """Calculate cosine similarity between two vectors"""
+    from numpy import dot
+    from numpy.linalg import norm
+    return dot(a, b) / (norm(a) * norm(b))
+
+async def get_relevant_context(prompt: str, top_n: int = 2) -> str:
+    """Get relevant context from embeddings for RAG"""
+    if not chunk_embeddings or not article_chunks:
+        logger.warning("⚠️ No embeddings available for RAG")
+        return ""
+    
+    try:
+        # 임베딩 차원 자동 감지
+        embedding_dim = len(chunk_embeddings[0])
+        logger.info(f"📊 Detected embedding dimension: {embedding_dim}")
+        
+        # 차원에 따라 적절한 API 사용
+        if embedding_dim == 1536:
+            # OpenAI 임베딩 (text-embedding-3-small)
+            logger.info("🔧 Using OpenAI embedding model")
+            try:
+                openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+                q_embedding = openai_client.embeddings.create(
+                    input=prompt, 
+                    model="text-embedding-3-small"
+                ).data[0].embedding
+            except Exception as e:
+                logger.error(f"❌ OpenAI embedding failed: {e}")
+                logger.info("💡 Set OPENAI_API_KEY environment variable")
+                return ""
+                
+        else:
+            # Solar 임베딩 (모든 다른 차원)
+            logger.info(f"🔧 Using Solar embedding model (dimension: {embedding_dim})")
+            try:
+                q_embedding = client.embeddings.create(
+                    input=prompt, 
+                    model="solar-embedding-1-large-query"  # Solar 쿼리용 모델
+                ).data[0].embedding
+            except Exception as e:
+                logger.error(f"❌ Solar embedding failed: {e}")
+                logger.error(f"   Model: solar-embedding-1-large-query")
+                return ""
+        
+        # Calculate similarities
+        similarities = [cosine_similarity(q_embedding, emb) for emb in chunk_embeddings]
+        
+        # Get top N most similar chunks
+        top_indices = np.argsort(similarities)[-top_n:][::-1]
+        selected_context = "\n\n".join([article_chunks[i] for i in top_indices])
+        
+        # Format similarities for logging
+        similarity_scores = [f"{similarities[i]:.3f}" for i in top_indices]
+        logger.info(f"✅ Retrieved {top_n} relevant chunks (similarities: {similarity_scores})")
+        return selected_context
+        
+    except Exception as e:
+        logger.error(f"❌ Error getting relevant context: {e}")
+        return ""
+
+def clean_html(text):
+    """HTML 태그 제거"""
+    try:
+        return BeautifulSoup(text, 'html.parser').get_text()
+    except:
+        return text
+
+
+def format_news_date(date_str):
+    """날짜 포맷팅"""
+    try:
+        # 'Mon, 18 Nov 2024 09:30:00 +0900' 형식
+        dt = datetime.strptime(date_str, '%a, %d %b %Y %H:%M:%S %z')
+        return dt.strftime('%m/%d %H:%M')
+    except:
+        return "최근"
+
+
+def get_naver_news(query="부동산", display=5):
+    """
+    네이버 뉴스 API 호출
+    
+    Args:
+        query: 검색 키워드
+        display: 결과 개수 (1-100)
+    
+    Returns:
+        뉴스 아이템 리스트
+    """
+    if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
+        logger.error("❌ 네이버 API 키 미설정")
+        return []
+    
+    url = "https://openapi.naver.com/v1/search/news.json"
+    
+    headers = {
+        "X-Naver-Client-Id": NAVER_CLIENT_ID,
+        "X-Naver-Client-Secret": NAVER_CLIENT_SECRET
+    }
+    
+    params = {
+        "query": query,
+        "display": display,
+        "sort": "date"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        items = data.get("items", [])
+        
+        logger.info(f"✅ 네이버 뉴스 {len(items)}건 조회: '{query}'")
+        return items
+    
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"❌ HTTP 오류: {e.response.status_code}")
+        return []
+    except Exception as e:
+        logger.error(f"❌ 뉴스 조회 실패: {e}")
+        return []
+
+
+
+# ================================================================================
+# Pydantic Models
+# ================================================================================
+
 class DetailParams(BaseModel):
     prompt: dict
 
@@ -24,35 +264,784 @@ class Action(BaseModel):
 class RequestBody(BaseModel):
     action: Action
 
-@app.post("/generate")
-async def generate_text(request: RequestBody):
-    # Extract prompt from nested JSON
-    prompt = request.action.params.get("prompt")
+class QueuedRequest(BaseModel):
+    request_id: str
+    request_body: dict
+    timestamp: str
+    retry_count: int = 0
+    error_message: Optional[str] = None
+
+class HealthStatus(BaseModel):
+    status: str
+    model: str
+    mode: str
+    server_healthy: bool
+    last_check: str
+    redis_connected: bool
+    queue_size: int
+    processing_queue_size: int
+    failed_queue_size: int
+
+# ================================================================================
+# Redis & Queue Management
+# ================================================================================
+
+async def init_redis():
+    """Initialize Redis connection"""
+    global redis_client, use_in_memory_queue
+    
+    if not REDIS_AVAILABLE:
+        logger.warning("⚠️ Redis package not installed - using in-memory queue")
+        use_in_memory_queue = True
+        return
+    
     try:
-        # Call OpenAI API with the provided prompt
-        response = client.responses.create(
-            model="gpt-4.1-nano",
-            input=prompt # type: ignore
+        redis_client = await redis.Redis(
+            host=REDIS_HOST,
+            port=REDIS_PORT,
+            db=REDIS_DB,
+            password=REDIS_PASSWORD,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_keepalive=True,
+            retry_on_timeout=True
         )
-        # Return the generated text
+        await redis_client.ping()
+        logger.info(f"✅ Redis connected: {REDIS_HOST}:{REDIS_PORT}")
+        use_in_memory_queue = False
+    except Exception as e:
+        logger.warning(f"⚠️ Redis connection failed: {e}")
+        logger.info("📦 Using in-memory queue as fallback")
+        redis_client = None
+        use_in_memory_queue = True
+
+async def close_redis():
+    """Close Redis connection"""
+    global redis_client
+    if redis_client:
+        await redis_client.close()
+        logger.info("Redis connection closed")
+
+async def enqueue_webhook_request(request_id: str, request_body: dict) -> bool:
+    """Add webhook request to queue"""
+    try:
+        queued_request = QueuedRequest(
+            request_id=request_id,
+            request_body=request_body,
+            timestamp=datetime.now().isoformat(),
+            retry_count=0
+        )
+        
+        if use_in_memory_queue:
+            in_memory_webhook_queue.appendleft(queued_request)
+            logger.info(f"✅ Request {request_id} enqueued (in-memory)")
+            return True
+        
+        if not redis_client:
+            logger.warning("Queue not available - cannot enqueue request")
+            return False
+        
+        await redis_client.lpush(
+            WEBHOOK_QUEUE_NAME,
+            queued_request.model_dump_json()
+        )
+        logger.info(f"✅ Request {request_id} enqueued (Redis)")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to enqueue request: {e}")
+        return False
+
+async def dequeue_webhook_request() -> Optional[QueuedRequest]:
+    """Get next webhook request from queue"""
+    try:
+        if use_in_memory_queue:
+            if len(in_memory_webhook_queue) > 0:
+                request = in_memory_webhook_queue.pop()
+                in_memory_processing_queue.appendleft(request)
+                return request
+            return None
+        
+        if not redis_client:
+            return None
+        
+        result = await redis_client.brpoplpush(
+            WEBHOOK_QUEUE_NAME,
+            WEBHOOK_PROCESSING_QUEUE,
+            timeout=1
+        )
+        
+        if result:
+            return QueuedRequest.model_validate_json(result)
+        return None
+    except Exception as e:
+        logger.error(f"❌ Failed to dequeue request: {e}")
+        return None
+
+async def complete_webhook_request(request_id: str):
+    """Mark webhook request as completed"""
+    try:
+        if use_in_memory_queue:
+            for req in list(in_memory_processing_queue):
+                if req.request_id == request_id:
+                    in_memory_processing_queue.remove(req)
+                    logger.info(f"✅ Request {request_id} completed (in-memory)")
+                    return
+            return
+        
+        if not redis_client:
+            return
+        
+        processing_items = await redis_client.lrange(WEBHOOK_PROCESSING_QUEUE, 0, -1)
+        for item in processing_items:
+            req = QueuedRequest.model_validate_json(item)
+            if req.request_id == request_id:
+                await redis_client.lrem(WEBHOOK_PROCESSING_QUEUE, 1, item)
+                logger.info(f"✅ Request {request_id} completed (Redis)")
+                break
+    except Exception as e:
+        logger.error(f"❌ Failed to complete request: {e}")
+
+async def fail_webhook_request(request_id: str, error_message: str):
+    """Move failed request to failed queue or retry"""
+    try:
+        if use_in_memory_queue:
+            for req in list(in_memory_processing_queue):
+                if req.request_id == request_id:
+                    req.retry_count += 1
+                    req.error_message = error_message
+                    in_memory_processing_queue.remove(req)
+                    
+                    if req.retry_count < MAX_RETRY_ATTEMPTS:
+                        in_memory_webhook_queue.appendleft(req)
+                        logger.info(f"♻️ Retrying request {request_id} (attempt {req.retry_count})")
+                    else:
+                        in_memory_failed_queue.appendleft(req)
+                        logger.error(f"❌ Request {request_id} failed after {MAX_RETRY_ATTEMPTS} attempts")
+                    return
+            return
+        
+        if not redis_client:
+            return
+        
+        processing_items = await redis_client.lrange(WEBHOOK_PROCESSING_QUEUE, 0, -1)
+        for item in processing_items:
+            req = QueuedRequest.model_validate_json(item)
+            if req.request_id == request_id:
+                req.retry_count += 1
+                req.error_message = error_message
+                
+                await redis_client.lrem(WEBHOOK_PROCESSING_QUEUE, 1, item)
+                
+                if req.retry_count < MAX_RETRY_ATTEMPTS:
+                    await redis_client.lpush(WEBHOOK_QUEUE_NAME, req.model_dump_json())
+                    logger.info(f"♻️ Retrying request {request_id} (attempt {req.retry_count})")
+                else:
+                    await redis_client.lpush(WEBHOOK_FAILED_QUEUE, req.model_dump_json())
+                    logger.error(f"❌ Request {request_id} failed after {MAX_RETRY_ATTEMPTS} attempts")
+                break
+    except Exception as e:
+        logger.error(f"❌ Failed to handle failed request: {e}")
+
+async def get_queue_sizes():
+    """Get sizes of all queues"""
+    try:
+        if use_in_memory_queue:
+            return (
+                len(in_memory_webhook_queue),
+                len(in_memory_processing_queue),
+                len(in_memory_failed_queue)
+            )
+        
+        if not redis_client:
+            return (0, 0, 0)
+        
+        queue_size = await redis_client.llen(WEBHOOK_QUEUE_NAME)
+        processing_size = await redis_client.llen(WEBHOOK_PROCESSING_QUEUE)
+        failed_size = await redis_client.llen(WEBHOOK_FAILED_QUEUE)
+        
+        return (queue_size, processing_size, failed_size)
+    except Exception as e:
+        logger.error(f"❌ Failed to get queue sizes: {e}")
+        return (0, 0, 0)
+
+# ================================================================================
+# Background Tasks
+# ================================================================================
+
+async def health_check_monitor():
+    """Monitor server health"""
+    global server_healthy, unhealthy_count, last_health_check
+    
+    while True:
+        try:
+            await asyncio.sleep(HEALTH_CHECK_INTERVAL)
+            
+            # Test Solar API
+            test_response = client.chat.completions.create(
+                model="solar-mini",
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=5,
+                timeout=2
+            )
+            
+            if test_response.choices[0].message.content:
+                if not server_healthy:
+                    logger.info("✅ Server recovered - healthy")
+                server_healthy = True
+                unhealthy_count = 0
+            else:
+                raise Exception("Empty response from API")
+                
+        except Exception as e:
+            unhealthy_count += 1
+            logger.warning(f"⚠️ Health check failed ({unhealthy_count}/{MAX_UNHEALTHY_COUNT}): {e}")
+            
+            if unhealthy_count >= MAX_UNHEALTHY_COUNT:
+                server_healthy = False
+                logger.error("❌ Server marked as unhealthy")
+        
+        finally:
+            last_health_check = datetime.now()
+
+async def queue_processor():
+    """Process queued webhook requests"""
+    logger.info("🔄 Queue processor started")
+    
+    while True:
+        try:
+            await asyncio.sleep(QUEUE_PROCESS_INTERVAL)
+            
+            request = await dequeue_webhook_request()
+            if not request:
+                continue
+            
+            logger.info(f"📤 Processing queued request: {request.request_id}")
+            
+            try:
+                result = await process_solar_rag_request(request.request_body)
+                await complete_webhook_request(request.request_id)
+                logger.info(f"✅ Queued request {request.request_id} completed")
+                
+            except Exception as e:
+                error_msg = f"{type(e).__name__}: {str(e)}"
+                logger.error(f"❌ Failed to process queued request: {error_msg}")
+                await fail_webhook_request(request.request_id, error_msg)
+                
+        except Exception as e:
+            logger.error(f"❌ Queue processor error: {e}")
+            await asyncio.sleep(1)
+
+# ================================================================================
+# Core Request Processing with RAG
+# ================================================================================
+
+async def process_solar_rag_request(request_body: dict):
+    """Process request with Solar API + RAG"""
+    
+    # Extract prompt from various possible locations
+    prompt = None
+    
+    if request_body.get("action", {}).get("params", {}).get("prompt"):
+        prompt = request_body["action"]["params"]["prompt"]
+        logger.info(f"✅ Method 1 (action.params.prompt): '{prompt}'")
+    
+    elif request_body.get("action", {}).get("detailParams", {}).get("prompt", {}).get("value"):
+        prompt = request_body["action"]["detailParams"]["prompt"]["value"]
+        logger.info(f"✅ Method 2 (action.detailParams.prompt.value): '{prompt}'")
+    
+    elif request_body.get("userRequest", {}).get("utterance"):
+        prompt = request_body["userRequest"]["utterance"]
+        logger.info(f"✅ Method 3 (userRequest.utterance): '{prompt}'")
+    
+    elif request_body.get("utterance"):
+        prompt = request_body["utterance"]
+        logger.info(f"✅ Method 4 (utterance): '{prompt}'")
+    
+    if not prompt or (isinstance(prompt, str) and prompt.strip() == ""):
+        logger.warning("⚠️ No prompt found in request!")
+        return {
+            "version": "2.0",
+            "template": {
+                "outputs": [{
+                    "simpleText": {
+                        "text": "안녕하세요! REXA입니다. 무엇이 궁금하신가요?\n부동산 세금, 경매, 민법 등에 대해 질문해주세요."
+                    }
+                }]
+            }
+        }
+    
+    logger.info(f"📝 Final extracted prompt: '{prompt}'")
+    
+    # Get relevant context using RAG
+    context = await get_relevant_context(prompt, top_n=2)
+    
+    # Build the query with context
+    if context:
+        query = f"""Use the below context to answer the question. 
+You are REXA, a chatbot that is a real estate expert with 10 years of experience in taxation (capital gains tax, property holding tax, gift/inheritance tax, acquisition tax), auctions, civil law, and building law. 
+Respond politely and with a trustworthy tone, as a professional advisor would. To ensure fast responses, keep your answers under 250 tokens. 
+If you don't know about the information ask the user once more time.
+
+Context:
+\"\"\"
+{context}
+\"\"\"
+
+Question: {prompt}
+
+And please respond in Korean following the above format."""
+        logger.info(f"🔍 Using RAG with {len(context)} chars of context")
+    else:
+        query = f"""You are REXA, a chatbot that is a real estate expert with 10 years of experience in taxation (capital gains tax, property holding tax, gift/inheritance tax, acquisition tax), auctions, civil law, and building law. 
+Respond politely and with a trustworthy tone, as a professional advisor would. To ensure fast responses, keep your answers under 250 tokens. 
+If you don't know about the information ask the user once more time.
+
+Question: {prompt}
+
+And please respond in Korean following the above format."""
+        logger.info("ℹ️ Processing without RAG context")
+    
+    logger.info(f"🤖 Calling Solar API with prompt: {prompt[:50]}...")
+    
+    try:
+        response = client.chat.completions.create(
+            model="solar-mini",
+            messages=[{"role": "user", "content": query}],
+            temperature=0,
+            timeout=API_TIMEOUT
+        )
+        
+        answer = response.choices[0].message.content
+        logger.info(f"✅ Solar API success - Response length: {len(answer)} chars")
+        logger.info(f"📤 Sending response: {answer[:100]}...")
+        
         return {
             "version": "2.0",
             "template": {
                 "outputs": [
                     {
                         "simpleText": {
-                            "text": response.output_text
+                            "text": answer
                         }
                     }
                 ]
             }
         }
+        
     except APITimeoutError as e:
-        logging.error(f"OpenAI API timeout: {e}")
-        return {"error": "OpenAI API timeout occurred."}
+        logger.error(f"⏰ API Timeout after {API_TIMEOUT}s: {e}")
+        raise
     except OpenAIError as e:
-        logging.error(f"OpenAI API error: {e}")
-        return {"error": "OpenAI API error occurred."}
+        logger.error(f"❌ OpenAI API Error: {e}")
+        raise
     except Exception as e:
-        logging.error(f"Unknown error: {e}")
-        return {"error": "Unknown error occurred."}
+        logger.error(f"❌ Unexpected error: {type(e).__name__}: {e}")
+        raise
+
+# ================================================================================
+# API Endpoints
+# ================================================================================
+
+@app.get("/")
+def read_root():
+    return {"Hello": "REXA - Real Estate Expert Assistant (Solar + RAG)"}
+
+@app.post("/generate")
+async def generate_text(request: RequestBody):
+    """REXA 부동산 전문 챗봇 with RAG - /generate 엔드포인트"""
+    request_id = str(uuid.uuid4())
+    
+    logger.info("="*50)
+    logger.info(f"📨 New request received at /generate: {request_id[:8]}")
+    logger.info(f"📋 Full request body: {request.model_dump()}")
+    
+    try:
+        # 3초 타임아웃으로 빠른 응답 시도
+        result = await process_solar_rag_request(request.model_dump())
+        logger.info(f"✅ Request {request_id[:8]} completed successfully")
+        return result
+        
+    except APITimeoutError as e:
+        logger.warning(f"⏰ Timeout (3s) - enqueueing request {request_id}")
+        await enqueue_webhook_request(request_id, request.model_dump())
+        
+        return {
+            "version": "2.0",
+            "template": {
+                "outputs": [
+                    {
+                        "simpleText": {
+                            "text": "답변 생성에 시간이 걸리고 있습니다. 잠시 후 다시 질문해주세요."
+                        }
+                    }
+                ]
+            }
+        }
+        
+    except OpenAIError as e:
+        logger.error(f"❌ API Error: {e}")
+        await enqueue_webhook_request(request_id, request.model_dump())
+        
+        return {
+            "version": "2.0",
+            "template": {
+                "outputs": [
+                    {
+                        "simpleText": {
+                            "text": "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+                        }
+                    }
+                ]
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error: {type(e).__name__}: {e}")
+        await enqueue_webhook_request(request_id, request.model_dump())
+        
+        return {
+            "version": "2.0",
+            "template": {
+                "outputs": [
+                    {
+                        "simpleText": {
+                            "text": "죄송합니다. 오류가 발생했습니다. 다시 한번 질문해주시겠어요?"
+                        }
+                    }
+                ]
+            }
+        }
+
+@app.post("/custom")
+async def generate_custom(request: RequestBody):
+    """REXA 부동산 전문 챗봇 with RAG - 카카오톡 5초 제한 대응"""
+    request_id = str(uuid.uuid4())
+    
+    logger.info("="*50)
+    logger.info(f"📨 New RAG request received: {request_id[:8]}")
+    logger.info(f"📋 Full request body: {request.model_dump()}")
+    
+    try:
+        # 3초 타임아웃으로 빠른 응답 시도
+        result = await process_solar_rag_request(request.model_dump())
+        logger.info(f"✅ Request {request_id[:8]} completed successfully")
+        return result
+        
+    except APITimeoutError as e:
+        logger.warning(f"⏰ Timeout (3s) - enqueueing request {request_id}")
+        await enqueue_webhook_request(request_id, request.model_dump())
+        
+        return {
+            "version": "2.0",
+            "template": {
+                "outputs": [
+                    {
+                        "simpleText": {
+                            "text": "답변 생성에 시간이 걸리고 있습니다. 잠시 후 다시 질문해주세요."
+                        }
+                    }
+                ]
+            }
+        }
+        
+    except OpenAIError as e:
+        logger.error(f"❌ API Error: {e}")
+        await enqueue_webhook_request(request_id, request.model_dump())
+        
+        return {
+            "version": "2.0",
+            "template": {
+                "outputs": [
+                    {
+                        "simpleText": {
+                            "text": "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+                        }
+                    }
+                ]
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error: {type(e).__name__}: {e}")
+        await enqueue_webhook_request(request_id, request.model_dump())
+        
+        return {
+            "version": "2.0",
+            "template": {
+                "outputs": [
+                    {
+                        "simpleText": {
+                            "text": "죄송합니다. 오류가 발생했습니다. 다시 한번 질문해주시겠어요?"
+                        }
+                    }
+                ]
+            }
+        }
+
+
+
+@app.post("/newsbot")
+async def newsbot(request: RequestBody):
+    """
+    뉴스봇 엔드포인트
+    카카오톡 REXA 채널 전용
+    """
+    request_id = str(uuid.uuid4())
+    
+    logger.info("="*50)
+    logger.info(f"📰 뉴스봇 요청: {request_id[:8]}")
+    
+    try:
+        # 요청 데이터
+        data = request.model_dump()
+        user_id = data.get("userRequest", {}).get("user", {}).get("id", "unknown")
+        
+        logger.info(f"   사용자: {user_id[:8]}")
+        
+        # 네이버 뉴스 가져오기
+        news_items = get_naver_news("부동산", display=5)
+        
+        # API 키 체크
+        if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
+            logger.error("❌ 네이버 API 키 미설정")
+            return {
+                "version": "2.0",
+                "template": {
+                    "outputs": [{
+                        "simpleText": {
+                            "text": "❌ 네이버 API 키가 설정되지 않았습니다.\n\nRender 환경 변수를 확인해주세요."
+                        }
+                    }]
+                }
+            }
+        
+        # 뉴스 없음
+        if not news_items:
+            logger.warning("⚠️ 뉴스 없음")
+            return {
+                "version": "2.0",
+                "template": {
+                    "outputs": [{
+                        "simpleText": {
+                            "text": "📰 최근 부동산 뉴스를 가져올 수 없습니다.\n잠시 후 다시 시도해주세요."
+                        }
+                    }]
+                }
+            }
+        
+        # 메시지 생성
+        message = f"📰 오늘의 부동산 뉴스 TOP {len(news_items)}\n\n"
+        
+        for i, item in enumerate(news_items, 1):
+            title = clean_html(item.get('title', ''))
+            pub_date = format_news_date(item.get('pubDate', ''))
+            
+            # 제목 길이 제한
+            if len(title) > 50:
+                title = title[:50] + "..."
+            
+            message += f"{i}. {title}\n"
+            message += f"   📅 {pub_date}\n\n"
+        
+        message += "💡 번호를 선택하면 자세한 내용을 볼 수 있습니다!"
+        
+        # Quick Reply 버튼
+        quick_replies = []
+        for i in range(1, min(len(news_items) + 1, 6)):
+            quick_replies.append({
+                "action": "message",
+                "label": f"{i}번",
+                "messageText": f"{i}번 뉴스"
+            })
+        
+        logger.info(f"✅ 뉴스 {len(news_items)}건 응답 완료")
+        
+        # 카카오톡 응답
+        return {
+            "version": "2.0",
+            "template": {
+                "outputs": [{
+                    "simpleText": {
+                        "text": message
+                    }
+                }],
+                "quickReplies": quick_replies
+            }
+        }
+    
+    except Exception as e:
+        logger.error(f"❌ 뉴스봇 오류: {e}", exc_info=True)
+        return {
+            "version": "2.0",
+            "template": {
+                "outputs": [{
+                    "simpleText": {
+                        "text": "죄송합니다. 뉴스를 불러오는 중 오류가 발생했습니다.\n다시 시도해주세요."
+                    }
+                }]
+            }
+        }
+
+
+@app.get("/news/test")
+async def test_news_api():
+    """
+    뉴스 API 테스트 엔드포인트
+    브라우저: https://kakao-solar-chatbot.onrender.com/news/test
+    """
+    try:
+        logger.info("🔍 뉴스 테스트 시작")
+        
+        news_items = get_naver_news("부동산", display=5)
+        
+        if not news_items:
+            return {
+                "success": False,
+                "error": "뉴스를 가져올 수 없습니다",
+                "api_configured": bool(NAVER_CLIENT_ID and NAVER_CLIENT_SECRET),
+                "client_id": f"{NAVER_CLIENT_ID[:10]}..." if NAVER_CLIENT_ID else None
+            }
+        
+        result = []
+        for i, item in enumerate(news_items, 1):
+            result.append({
+                "number": i,
+                "title": clean_html(item.get('title', '')),
+                "date": format_news_date(item.get('pubDate', '')),
+                "link": item.get('link', ''),
+                "description": clean_html(item.get('description', ''))[:100]
+            })
+        
+        logger.info(f"✅ 테스트 성공: {len(result)}건")
+        
+        return {
+            "success": True,
+            "count": len(result),
+            "api_configured": True,
+            "news": result
+        }
+    
+    except Exception as e:
+        logger.error(f"❌ 테스트 오류: {e}", exc_info=True)
+        return {
+            "success": False,
+            "error": str(e),
+            "api_configured": bool(NAVER_CLIENT_ID and NAVER_CLIENT_SECRET)
+        }
+
+
+
+@app.get("/health")
+async def health_check() -> HealthStatus:
+    """Enhanced health check endpoint"""
+    queue_size, processing_size, failed_size = await get_queue_sizes()
+    
+    return HealthStatus(
+        status="healthy" if server_healthy else "unhealthy",
+        model="solar-mini",
+        mode="rexa_chatbot_rag",
+        server_healthy=server_healthy,
+        last_check=last_health_check.isoformat(),
+        redis_connected=(redis_client is not None and not use_in_memory_queue),
+        queue_size=queue_size,
+        processing_queue_size=processing_size,
+        failed_queue_size=failed_size
+    )
+
+@app.get("/health/ping")
+async def health_ping():
+    """Simple ping endpoint for client health checks"""
+    return {
+        "alive": True,
+        "healthy": server_healthy,
+        "timestamp": datetime.now().isoformat(),
+        "rag_enabled": len(chunk_embeddings) > 0
+    }
+
+@app.get("/queue/status")
+async def queue_status():
+    """Get detailed queue status"""
+    queue_size, processing_size, failed_size = await get_queue_sizes()
+    
+    return {
+        "queue_type": "in-memory" if use_in_memory_queue else "redis",
+        "webhook_queue": queue_size,
+        "processing_queue": processing_size,
+        "failed_queue": failed_size,
+        "total": queue_size + processing_size + failed_size,
+        "rag_chunks_loaded": len(article_chunks)
+    }
+
+@app.post("/queue/retry-failed")
+async def retry_failed_requests():
+    """Manually retry all failed requests"""
+    try:
+        if use_in_memory_queue:
+            retry_count = len(in_memory_failed_queue)
+            while len(in_memory_failed_queue) > 0:
+                req = in_memory_failed_queue.pop()
+                req.retry_count = 0
+                in_memory_webhook_queue.appendleft(req)
+            
+            logger.info(f"✅ Retrying {retry_count} failed requests (in-memory)")
+            return {"retried": retry_count, "queue_type": "in-memory"}
+        
+        if not redis_client:
+            return {"error": "Queue not available"}
+        
+        failed_items = await redis_client.lrange(WEBHOOK_FAILED_QUEUE, 0, -1)
+        retry_count = 0
+        
+        for item in failed_items:
+            req = QueuedRequest.model_validate_json(item)
+            req.retry_count = 0
+            await redis_client.lpush(WEBHOOK_QUEUE_NAME, req.model_dump_json())
+            retry_count += 1
+        
+        await redis_client.delete(WEBHOOK_FAILED_QUEUE)
+        
+        logger.info(f"✅ Retrying {retry_count} failed requests (Redis)")
+        return {"retried": retry_count, "queue_type": "redis"}
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to retry requests: {e}")
+        return {"error": str(e)}
+
+# ================================================================================
+# Startup & Shutdown Events
+# ================================================================================
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize resources on startup"""
+    logger.info("="*70)
+    logger.info("🚀 Starting REXA server (Solar + RAG)...")
+    logger.info("="*70)
+    
+    # RAG 상태 확인
+    if len(chunk_embeddings) > 0:
+        logger.info(f"✅ RAG ENABLED: {len(chunk_embeddings)} chunks loaded")
+    else:
+        logger.warning("⚠️ RAG DISABLED: No embeddings loaded")
+        logger.warning("⚠️ Server will work but without company-specific knowledge")
+    
+    # Redis 초기화
+    await init_redis()
+    
+    # Background tasks
+    asyncio.create_task(health_check_monitor())
+    asyncio.create_task(queue_processor())
+    
+    logger.info("="*70)
+    logger.info("✅ REXA server startup complete!")
+    logger.info(f"   - Model: solar-mini")
+    logger.info(f"   - RAG chunks: {len(chunk_embeddings)}")
+    logger.info(f"   - Redis: {'connected' if redis_client else 'in-memory queue'}")
+    logger.info("="*70)
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup resources on shutdown"""
+    logger.info("👋 Shutting down REXA server (Solar + RAG)...")
+    await close_redis()
+    logger.info("✅ REXA server shut down successfully")
