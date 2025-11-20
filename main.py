@@ -271,8 +271,8 @@ except Exception as e:
 # News Functions
 # ================================================================================
 
-def search_naver_news(query: str = "부동산", display: int = 10) -> Optional[dict]:
-    """네이버 뉴스 API로 최신 뉴스 검색 - 네이버 뉴스 도메인만"""
+def search_naver_news(query: str = "부동산", display: int = 10) -> Optional[list]:
+    """네이버 뉴스 API로 최신 뉴스 검색 - 네이버 뉴스 도메인만 (리스트 반환)"""
     url = "https://openapi.naver.com/v1/search/news.json"
     
     headers = {
@@ -282,7 +282,7 @@ def search_naver_news(query: str = "부동산", display: int = 10) -> Optional[d
     
     params = {
         "query": query,
-        "display": display,  # 10개 가져와서 필터링
+        "display": display,
         "sort": "date"  # 최신순
     }
     
@@ -300,38 +300,40 @@ def search_naver_news(query: str = "부동산", display: int = 10) -> Optional[d
         
         if not naver_items:
             logger.warning("⚠️ 네이버 뉴스가 없습니다. 일반 뉴스를 사용합니다.")
-            # 폴백: 네이버 뉴스가 없으면 첫 번째 뉴스 사용
-            item = items[0]
-        else:
-            # 네이버 뉴스 중 첫 번째 선택
-            item = naver_items[0]
-            logger.info(f"✅ 네이버 뉴스 선택: {item['link'][:50]}...")
+            naver_items = items  # 폴백: 모든 뉴스 사용
+        
+        logger.info(f"✅ 네이버 뉴스 {len(naver_items)}개 발견")
+        
+        # 모든 뉴스 아이템 처리
+        processed_items = []
+        for item in naver_items:
+            # HTML 태그 제거
+            title = re.sub('<[^<]+?>', '', item['title'])
+            description = re.sub('<[^<]+?>', '', item['description'])
             
-        # HTML 태그 제거
-        title = re.sub('<[^<]+?>', '', item['title'])
-        description = re.sub('<[^<]+?>', '', item['description'])
+            # HTML 엔티티 디코딩
+            import html
+            title = html.unescape(title)
+            description = html.unescape(description)
+            
+            # 요약 길이 제한 (200자, 문장 단위로)
+            if len(description) > 200:
+                cut_pos = 200
+                for i in range(200, max(0, len(description) - 100), -1):
+                    if description[i] in '.!?':
+                        cut_pos = i + 1
+                        break
+                description = description[:cut_pos].strip()
+            
+            processed_items.append({
+                "title": title,
+                "description": description,
+                "link": item['link'],
+                "pubDate": item['pubDate']
+            })
         
-        # HTML 엔티티 디코딩 (&quot; → ", &amp; → & 등)
-        import html
-        title = html.unescape(title)
-        description = html.unescape(description)
+        return processed_items
         
-        # 요약 길이 제한 (200자, 문장 단위로)
-        if len(description) > 200:
-            # 마지막 문장 부호(., !, ?) 위치 찾기
-            cut_pos = 200
-            for i in range(200, max(0, len(description) - 100), -1):
-                if description[i] in '.!?':
-                    cut_pos = i + 1
-                    break
-            description = description[:cut_pos].strip()
-        
-        return {
-            "title": title,
-            "description": description,
-            "link": item['link'],  # 원본 URL 그대로
-            "pubDate": item['pubDate']
-        }
     except Exception as e:
         logger.error(f"❌ 뉴스 검색 오류: {e}")
         return None
@@ -817,7 +819,7 @@ async def generate(request: RequestBody):
 
 @app.post("/news")
 async def news_bot(request: RequestBody):
-    """부동산 뉴스봇 - 뉴스 1개 불러오고 질의응답 세션 시작"""
+    """부동산 뉴스봇 - 사용자에게는 1개 표시, 백그라운드에서 10개 저장"""
     request_id = str(uuid.uuid4())
     
     logger.info("="*50)
@@ -830,10 +832,10 @@ async def news_bot(request: RequestBody):
         user_info = user_request.get("user", {})
         user_id = user_info.get("id", "default")
         
-        # 네이버 뉴스 검색 (10개 가져와서 네이버 뉴스만 필터링)
-        news_item = search_naver_news("부동산", display=10)
+        # 네이버 뉴스 검색 (10개 가져오기)
+        news_items = search_naver_news("부동산", display=10)
         
-        if not news_item:
+        if not news_items or len(news_items) == 0:
             return {
                 "version": "2.0",
                 "template": {
@@ -843,33 +845,51 @@ async def news_bot(request: RequestBody):
                 }
             }
         
-        # 뉴스 본문 크롤링 (질의응답용)
-        news_content = crawl_news_content(news_item['link'])
+        logger.info(f"📊 총 {len(news_items)}개 뉴스 발견 - 모두 크롤링 시작")
         
-        # 세션에 저장 (title, description, url, content)
+        # 첫 번째 뉴스 (사용자에게 표시할 뉴스)
+        first_news = news_items[0]
+        first_news_content = crawl_news_content(first_news['link'])
+        
+        # 세션에 저장 (질의응답용 - 첫 번째 뉴스만)
         news_sessions[user_id] = {
-            "title": news_item['title'],
-            "description": news_item['description'],
-            "content": news_content,
-            "url": news_item['link'],
+            "title": first_news['title'],
+            "description": first_news['description'],
+            "content": first_news_content,
+            "url": first_news['link'],
             "timestamp": datetime.now().isoformat()
         }
         
-        logger.info(f"✅ News session created for user {user_id}")
-        logger.info(f"📰 News: {news_item['title'][:50]}...")
+        logger.info(f"✅ 첫 번째 뉴스 (표시용): {first_news['title'][:50]}...")
         
-        # 뉴스 로그 저장 (CSV + Google Sheets) - 크롤링된 본문 포함
-        save_news_log(
-            title=news_item['title'],
-            description=news_item['description'],
-            url=news_item['link'],
-            content=news_content,  # 크롤링된 원문 전체
-            user_id=user_id
-        )
+        # 모든 뉴스 크롤링 및 저장 (백그라운드)
+        saved_count = 0
+        for idx, news_item in enumerate(news_items):
+            try:
+                # 크롤링
+                news_content = crawl_news_content(news_item['link'])
+                
+                # 저장 (CSV + Google Sheets)
+                save_news_log(
+                    title=news_item['title'],
+                    description=news_item['description'],
+                    url=news_item['link'],
+                    content=news_content,
+                    user_id=user_id
+                )
+                
+                saved_count += 1
+                logger.info(f"✅ [{saved_count}/{len(news_items)}] 저장 완료: {news_item['title'][:30]}...")
+                
+            except Exception as e:
+                logger.error(f"❌ 뉴스 {idx+1} 저장 실패: {e}")
+                continue
         
-        # Solar AI로 본문 요약 생성 (3-4문장, 완전한 문장)
+        logger.info(f"🎉 총 {saved_count}개 뉴스 저장 완료!")
+        
+        # Solar AI로 첫 번째 뉴스 요약 생성
         try:
-            summary_prompt = f"다음 뉴스를 3-4개의 완전한 문장으로 요약해주세요. 문장 중간에 끊기지 않도록 주의하세요.\n\n제목: {news_item['title']}\n\n본문: {news_content[:1500]}"
+            summary_prompt = f"다음 뉴스를 3-4개의 완전한 문장으로 요약해주세요. 문장 중간에 끊기지 않도록 주의하세요.\n\n제목: {first_news['title']}\n\n본문: {first_news_content[:1500]}"
             
             response = client.chat.completions.create(
                 model="solar-mini",
@@ -886,20 +906,20 @@ async def news_bot(request: RequestBody):
             
         except Exception as e:
             logger.error(f"❌ Summary generation failed: {e}")
-            # 폴백: 네이버 description 사용 (마지막 마침표까지)
-            summary = news_item['description']
-            # 마지막 마침표 위치 찾기
+            # 폴백: 네이버 description 사용
+            summary = first_news['description']
             last_period = summary.rfind('.')
             if last_period > 0:
                 summary = summary[:last_period + 1]
         
+        # 사용자에게는 첫 번째 뉴스만 표시
         return {
             "version": "2.0",
             "template": {
                 "outputs": [
                     {
                         "simpleText": {
-                            "text": f"📰 {news_item['title']}\n\n{summary}\n\n🔗 {news_item['link']}\n\n💬 이 뉴스에 대해 궁금한 점을 물어보세요!"
+                            "text": f"📰 {first_news['title']}\n\n{summary}\n\n🔗 {first_news['link']}\n\n💬 이 뉴스에 대해 궁금한 점을 물어보세요!\n\n✨ 총 {saved_count}개의 최신 뉴스를 저장했습니다."
                         }
                     }
                 ],
@@ -917,7 +937,7 @@ async def news_bot(request: RequestBody):
                     {
                         "label": "원문 보기",
                         "action": "webLink",
-                        "webLinkUrl": news_item['link']
+                        "webLinkUrl": first_news['link']
                     }
                 ]
             }
