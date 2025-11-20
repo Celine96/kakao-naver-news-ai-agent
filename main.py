@@ -153,6 +153,11 @@ def search_naver_news(query: str = "부동산", display: int = 1) -> Optional[di
         title = re.sub('<[^<]+?>', '', item['title'])
         description = re.sub('<[^<]+?>', '', item['description'])
         
+        # HTML 엔티티 디코딩 (&quot; → ", &amp; → & 등)
+        import html
+        title = html.unescape(title)
+        description = html.unescape(description)
+        
         # 요약 길이 제한 (150자)
         if len(description) > 150:
             description = description[:150] + "..."
@@ -160,7 +165,7 @@ def search_naver_news(query: str = "부동산", display: int = 1) -> Optional[di
         return {
             "title": title,
             "description": description,
-            "link": item['link'],
+            "link": item['link'],  # 원본 URL 그대로
             "pubDate": item['pubDate']
         }
     except Exception as e:
@@ -692,7 +697,7 @@ async def news_bot(request: RequestBody):
                 "outputs": [
                     {
                         "simpleText": {
-                            "text": f"📰 {news_item['title']}\n\n{summary}\n\n💬 이 뉴스에 대해 궁금한 점을 물어보세요!"
+                            "text": f"📰 {news_item['title']}\n\n{summary}\n\n🔗 {news_item['link']}\n\n💬 이 뉴스에 대해 궁금한 점을 물어보세요!"
                         }
                     }
                 ],
