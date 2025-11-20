@@ -158,9 +158,15 @@ def search_naver_news(query: str = "부동산", display: int = 1) -> Optional[di
         title = html.unescape(title)
         description = html.unescape(description)
         
-        # 요약 길이 제한 (150자)
-        if len(description) > 150:
-            description = description[:150] + "..."
+        # 요약 길이 제한 (200자, 문장 단위로)
+        if len(description) > 200:
+            # 마지막 문장 부호(., !, ?) 위치 찾기
+            cut_pos = 200
+            for i in range(200, max(0, len(description) - 100), -1):
+                if description[i] in '.!?':
+                    cut_pos = i + 1
+                    break
+            description = description[:cut_pos].strip()
         
         return {
             "title": title,
