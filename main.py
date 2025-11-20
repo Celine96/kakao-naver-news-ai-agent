@@ -6,6 +6,8 @@ from typing import Optional, Any
 import uuid
 from collections import deque
 import re
+import csv
+import json
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -16,6 +18,15 @@ import pickle
 # 뉴스 크롤링용
 import requests
 from bs4 import BeautifulSoup
+
+# Google Sheets용
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GSPREAD_AVAILABLE = True
+except ImportError:
+    GSPREAD_AVAILABLE = False
+    logging.warning("gspread not installed. Google Sheets logging disabled.")
 
 # Redis for queue management
 try:
@@ -51,6 +62,17 @@ app = FastAPI(
 NAVER_CLIENT_ID = os.getenv("NAVER_CLIENT_ID")
 NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET")
 
+# Google Sheets Configuration
+GOOGLE_SHEETS_CREDENTIALS = os.getenv("GOOGLE_SHEETS_CREDENTIALS")
+GOOGLE_SHEETS_SPREADSHEET_ID = os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID")
+
+# CSV 파일 경로
+CSV_FILE_PATH = "news_log.csv"
+
+# Google Sheets 클라이언트 (전역)
+gsheet_client = None
+gsheet_worksheet = None
+
 # Redis Configuration
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
@@ -85,6 +107,131 @@ use_in_memory_queue = False
 
 # News session storage (user_id -> news_data)
 news_sessions = {}
+
+# ================================================================================
+# Google Sheets & CSV Initialization
+# ================================================================================
+
+def init_google_sheets():
+    """Initialize Google Sheets client"""
+    global gsheet_client, gsheet_worksheet
+    
+    if not GSPREAD_AVAILABLE:
+        logger.warning("⚠️ gspread not installed - Google Sheets logging disabled")
+        return False
+    
+    if not GOOGLE_SHEETS_CREDENTIALS or not GOOGLE_SHEETS_SPREADSHEET_ID:
+        logger.warning("⚠️ Google Sheets credentials not set - logging disabled")
+        return False
+    
+    try:
+        # JSON 문자열을 딕셔너리로 파싱
+        creds_dict = json.loads(GOOGLE_SHEETS_CREDENTIALS)
+        
+        # Credentials 생성
+        scopes = [
+            'https://www.googleapis.com/auth/spreadsheets',
+            'https://www.googleapis.com/auth/drive'
+        ]
+        credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        
+        # gspread 클라이언트 생성
+        gsheet_client = gspread.authorize(credentials)
+        
+        # 스프레드시트 열기
+        spreadsheet = gsheet_client.open_by_key(GOOGLE_SHEETS_SPREADSHEET_ID)
+        gsheet_worksheet = spreadsheet.sheet1
+        
+        # 헤더 확인 및 생성
+        try:
+            headers = gsheet_worksheet.row_values(1)
+            if not headers or headers[0] != 'timestamp':
+                gsheet_worksheet.insert_row(['timestamp', 'title', 'description', 'url', 'content', 'user_id'], 1)
+                logger.info("✅ Google Sheets headers created")
+        except Exception as e:
+            gsheet_worksheet.insert_row(['timestamp', 'title', 'description', 'url', 'content', 'user_id'], 1)
+            logger.info("✅ Google Sheets headers created")
+        
+        logger.info(f"✅ Google Sheets initialized: {GOOGLE_SHEETS_SPREADSHEET_ID}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize Google Sheets: {e}")
+        return False
+
+def init_csv_file():
+    """Initialize CSV file with headers"""
+    try:
+        # 파일이 없으면 헤더 생성
+        if not os.path.exists(CSV_FILE_PATH):
+            with open(CSV_FILE_PATH, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['timestamp', 'title', 'description', 'url', 'content', 'user_id'])
+            logger.info(f"✅ CSV file created: {CSV_FILE_PATH}")
+        else:
+            logger.info(f"✅ CSV file exists: {CSV_FILE_PATH}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize CSV: {e}")
+        return False
+
+def save_news_to_csv(news_data: dict):
+    """Save news to CSV file"""
+    try:
+        with open(CSV_FILE_PATH, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                news_data['timestamp'],
+                news_data['title'],
+                news_data['description'],
+                news_data['url'],
+                news_data['content'],
+                news_data['user_id']
+            ])
+        logger.info(f"✅ News saved to CSV: {news_data['title'][:30]}...")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to save to CSV: {e}")
+        return False
+
+def save_news_to_gsheet(news_data: dict):
+    """Save news to Google Sheets"""
+    if not gsheet_worksheet:
+        logger.warning("⚠️ Google Sheets not initialized - skipping")
+        return False
+    
+    try:
+        gsheet_worksheet.append_row([
+            news_data['timestamp'],
+            news_data['title'],
+            news_data['description'],
+            news_data['url'],
+            news_data['content'],
+            news_data['user_id']
+        ])
+        logger.info(f"✅ News saved to Google Sheets: {news_data['title'][:30]}...")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to save to Google Sheets: {e}")
+        return False
+
+def save_news_log(title: str, description: str, url: str, content: str = "", user_id: str = "unknown"):
+    """Save news to both CSV and Google Sheets"""
+    news_data = {
+        'timestamp': datetime.now().isoformat(),
+        'title': title,
+        'description': description,
+        'url': url,
+        'content': content,
+        'user_id': user_id
+    }
+    
+    # CSV 저장 (백업)
+    save_news_to_csv(news_data)
+    
+    # Google Sheets 저장 (메인)
+    save_news_to_gsheet(news_data)
+
 
 # ================================================================================
 # Upstage Solar API Configuration
@@ -190,7 +337,7 @@ def search_naver_news(query: str = "부동산", display: int = 10) -> Optional[d
         return None
 
 def crawl_news_content(url: str) -> str:
-    """뉴스 URL에서 본문 추출"""
+    """뉴스 URL에서 본문 추출 - 전체 원문"""
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -208,12 +355,18 @@ def crawl_news_content(url: str) -> str:
                 for tag in article.find_all(['script', 'style', 'aside']):
                     tag.decompose()
                 content = article.get_text(strip=True, separator='\n')
-                return content[:2500]  # 최대 2500자 (Solar API 컨텍스트 고려)
+                logger.info(f"📄 크롤링 성공: {len(content)}자")
+                return content  # 전체 원문 반환 (제한 없음)
         
         # 일반 뉴스 사이트 - p 태그 기반 추출
         paragraphs = soup.find_all('p')
         content = '\n'.join([p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 50])
-        return content[:2500] if content else "본문을 추출할 수 없습니다."
+        
+        if content:
+            logger.info(f"📄 크롤링 성공: {len(content)}자")
+            return content  # 전체 원문 반환
+        else:
+            return "본문을 추출할 수 없습니다."
         
     except Exception as e:
         logger.error(f"❌ 크롤링 오류: {e}")
@@ -705,6 +858,15 @@ async def news_bot(request: RequestBody):
         logger.info(f"✅ News session created for user {user_id}")
         logger.info(f"📰 News: {news_item['title'][:50]}...")
         
+        # 뉴스 로그 저장 (CSV + Google Sheets) - 크롤링된 본문 포함
+        save_news_log(
+            title=news_item['title'],
+            description=news_item['description'],
+            url=news_item['link'],
+            content=news_content,  # 크롤링된 원문 전체
+            user_id=user_id
+        )
+        
         # Solar AI로 본문 요약 생성 (3-4문장, 완전한 문장)
         try:
             summary_prompt = f"다음 뉴스를 3-4개의 완전한 문장으로 요약해주세요. 문장 중간에 끊기지 않도록 주의하세요.\n\n제목: {news_item['title']}\n\n본문: {news_content[:1500]}"
@@ -940,6 +1102,20 @@ async def startup_event():
     else:
         logger.warning("⚠️ Naver News API not configured")
     
+    # CSV 초기화
+    csv_success = init_csv_file()
+    if csv_success:
+        logger.info("✅ CSV logging enabled")
+    else:
+        logger.warning("⚠️ CSV logging disabled")
+    
+    # Google Sheets 초기화
+    gsheet_success = init_google_sheets()
+    if gsheet_success:
+        logger.info("✅ Google Sheets logging enabled")
+    else:
+        logger.warning("⚠️ Google Sheets logging disabled")
+    
     # Redis 초기화
     await init_redis()
     
@@ -953,6 +1129,8 @@ async def startup_event():
     logger.info(f"   - RAG chunks: {len(chunk_embeddings)}")
     logger.info(f"   - Redis: {'connected' if redis_client else 'in-memory queue'}")
     logger.info(f"   - News API: {'enabled' if NAVER_CLIENT_ID else 'disabled'}")
+    logger.info(f"   - CSV logging: {'enabled' if csv_success else 'disabled'}")
+    logger.info(f"   - Google Sheets: {'enabled' if gsheet_success else 'disabled'}")
     logger.info("="*70)
 
 @app.on_event("shutdown")
