@@ -153,6 +153,10 @@ def search_naver_news(query: str = "부동산", display: int = 1) -> Optional[di
         title = re.sub('<[^<]+?>', '', item['title'])
         description = re.sub('<[^<]+?>', '', item['description'])
         
+        # 요약 길이 제한 (150자)
+        if len(description) > 150:
+            description = description[:150] + "..."
+        
         return {
             "title": title,
             "description": description,
@@ -664,12 +668,13 @@ async def news_bot(request: RequestBody):
                 }
             }
         
-        # 뉴스 본문 크롤링
+        # 뉴스 본문 크롤링 (질의응답용)
         news_content = crawl_news_content(news_item['link'])
         
-        # 세션에 저장
+        # 세션에 저장 (title, description, url, content)
         news_sessions[user_id] = {
             "title": news_item['title'],
+            "description": news_item['description'],
             "content": news_content,
             "url": news_item['link'],
             "timestamp": datetime.now().isoformat()
@@ -678,25 +683,8 @@ async def news_bot(request: RequestBody):
         logger.info(f"✅ News session created for user {user_id}")
         logger.info(f"📰 News: {news_item['title'][:50]}...")
         
-        # Solar AI로 뉴스 요약
-        summary_prompt = f"다음 뉴스를 3-4문장으로 요약해주세요:\n\n{news_content[:1000]}"
-        
-        try:
-            response = client.chat.completions.create(
-                model="solar-mini",
-                messages=[
-                    {"role": "system", "content": "당신은 부동산 뉴스 전문 AI입니다."},
-                    {"role": "user", "content": summary_prompt}
-                ],
-                max_tokens=300,
-                timeout=API_TIMEOUT
-            )
-            
-            summary = response.choices[0].message.content.strip()
-            
-        except Exception as e:
-            logger.error(f"❌ Summary generation failed: {e}")
-            summary = news_item['description']
+        # 네이버 API 요약(description) 사용
+        summary = news_item['description']
         
         return {
             "version": "2.0",
