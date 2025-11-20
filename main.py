@@ -124,8 +124,8 @@ except Exception as e:
 # News Functions
 # ================================================================================
 
-def search_naver_news(query: str = "부동산", display: int = 1) -> Optional[dict]:
-    """네이버 뉴스 API로 최신 뉴스 1개 검색"""
+def search_naver_news(query: str = "부동산", display: int = 10) -> Optional[dict]:
+    """네이버 뉴스 API로 최신 뉴스 검색 - 네이버 뉴스 도메인만"""
     url = "https://openapi.naver.com/v1/search/news.json"
     
     headers = {
@@ -135,7 +135,7 @@ def search_naver_news(query: str = "부동산", display: int = 1) -> Optional[di
     
     params = {
         "query": query,
-        "display": display,
+        "display": display,  # 10개 가져와서 필터링
         "sort": "date"  # 최신순
     }
     
@@ -147,8 +147,19 @@ def search_naver_news(query: str = "부동산", display: int = 1) -> Optional[di
         items = data.get('items', [])
         if not items:
             return None
+        
+        # 네이버 뉴스 도메인만 필터링
+        naver_items = [item for item in items if 'news.naver.com' in item['link']]
+        
+        if not naver_items:
+            logger.warning("⚠️ 네이버 뉴스가 없습니다. 일반 뉴스를 사용합니다.")
+            # 폴백: 네이버 뉴스가 없으면 첫 번째 뉴스 사용
+            item = items[0]
+        else:
+            # 네이버 뉴스 중 첫 번째 선택
+            item = naver_items[0]
+            logger.info(f"✅ 네이버 뉴스 선택: {item['link'][:50]}...")
             
-        item = items[0]
         # HTML 태그 제거
         title = re.sub('<[^<]+?>', '', item['title'])
         description = re.sub('<[^<]+?>', '', item['description'])
@@ -666,8 +677,8 @@ async def news_bot(request: RequestBody):
         user_info = user_request.get("user", {})
         user_id = user_info.get("id", "default")
         
-        # 네이버 뉴스 검색
-        news_item = search_naver_news("부동산", display=1)
+        # 네이버 뉴스 검색 (10개 가져와서 네이버 뉴스만 필터링)
+        news_item = search_naver_news("부동산", display=10)
         
         if not news_item:
             return {
