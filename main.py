@@ -694,8 +694,31 @@ async def news_bot(request: RequestBody):
         logger.info(f"✅ News session created for user {user_id}")
         logger.info(f"📰 News: {news_item['title'][:50]}...")
         
-        # 네이버 API 요약(description) 사용
-        summary = news_item['description']
+        # Solar AI로 본문 요약 생성 (3-4문장, 완전한 문장)
+        try:
+            summary_prompt = f"다음 뉴스를 3-4개의 완전한 문장으로 요약해주세요. 문장 중간에 끊기지 않도록 주의하세요.\n\n제목: {news_item['title']}\n\n본문: {news_content[:1500]}"
+            
+            response = client.chat.completions.create(
+                model="solar-mini",
+                messages=[
+                    {"role": "system", "content": "당신은 부동산 뉴스 전문 요약 AI입니다. 항상 완전한 문장으로 요약합니다."},
+                    {"role": "user", "content": summary_prompt}
+                ],
+                max_tokens=300,
+                timeout=API_TIMEOUT
+            )
+            
+            summary = response.choices[0].message.content.strip()
+            logger.info(f"✅ Solar AI summary generated: {summary[:50]}...")
+            
+        except Exception as e:
+            logger.error(f"❌ Summary generation failed: {e}")
+            # 폴백: 네이버 description 사용 (마지막 마침표까지)
+            summary = news_item['description']
+            # 마지막 마침표 위치 찾기
+            last_period = summary.rfind('.')
+            if last_period > 0:
+                summary = summary[:last_period + 1]
         
         return {
             "version": "2.0",
