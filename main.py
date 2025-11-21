@@ -1,6 +1,7 @@
 import logging
 import os
 import asyncio
+import time
 from datetime import datetime
 from typing import Optional, Any
 import uuid
@@ -366,7 +367,12 @@ def crawl_news_content(url: str) -> str:
     for attempt in range(max_retries):
         try:
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'ko-KR,ko;q=0.9,en;q=0.8',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Referer': 'https://news.naver.com/',
+                'Connection': 'keep-alive'
             }
             response = requests.get(url, headers=headers, timeout=15)
             response.raise_for_status()
@@ -397,10 +403,25 @@ def crawl_news_content(url: str) -> str:
         except requests.exceptions.Timeout:
             if attempt < max_retries - 1:
                 logger.warning(f"⚠️ 타임아웃 발생 - 재시도 {attempt + 1}/{max_retries}")
+                time.sleep(2)  # 2초 대기 후 재시도
                 continue
             else:
                 logger.error(f"❌ 크롤링 타임아웃: {url[:50]}...")
                 return "본문을 가져올 수 없습니다. (타임아웃)"
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429:
+                # Too Many Requests
+                if attempt < max_retries - 1:
+                    wait_time = 3  # 3초 대기
+                    logger.warning(f"⚠️ Rate Limit (429) - {wait_time}초 대기 후 재시도")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"❌ Rate Limit 초과: {url[:50]}...")
+                    return "본문을 가져올 수 없습니다. (Rate Limit)"
+            else:
+                logger.error(f"❌ HTTP 오류 {e.response.status_code}: {url[:50]}...")
+                return f"본문을 가져올 수 없습니다. (HTTP {e.response.status_code})"
         except Exception as e:
             logger.error(f"❌ 크롤링 오류: {e}")
             return "본문을 가져올 수 없습니다."
@@ -898,8 +919,18 @@ async def news_bot(request: RequestBody):
         saved_count = 0
         for idx, news_item in enumerate(news_items):
             try:
+                # Rate Limit 방지: 각 크롤링 사이에 2초 대기 (429 방지)
+                if idx > 0:  # 첫 번째는 이미 크롤링했으므로
+                    logger.info(f"⏳ 2초 대기 (Rate Limit 방지)...")
+                    time.sleep(2)
+                
                 # 크롤링
                 news_content = crawl_news_content(news_item['link'])
+                
+                # 크롤링 실패한 경우 건너뛰기
+                if "본문을 가져올 수 없습니다" in news_content:
+                    logger.warning(f"⚠️ [{idx+1}/{len(news_items)}] 크롤링 실패 - 건너뛰기")
+                    continue
                 
                 # 저장 (CSV + Google Sheets)
                 save_news_log(
