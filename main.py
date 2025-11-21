@@ -20,6 +20,14 @@ import pickle
 import requests
 from bs4 import BeautifulSoup
 
+# 🆕 뉴스 필터링 시스템
+try:
+    from news_filter_simple import filter_real_estate_news, filter_news_batch
+    NEWS_FILTER_AVAILABLE = True
+except ImportError:
+    NEWS_FILTER_AVAILABLE = False
+    logging.warning("⚠️ news_filter_simple.py not found - filtering disabled")
+
 # Google Sheets용
 try:
     import gspread
@@ -164,13 +172,23 @@ def init_google_sheets():
         try:
             headers = gsheet_worksheet.row_values(1)
             if not headers or headers[0] != 'timestamp':
-                gsheet_worksheet.insert_row(['timestamp', 'title', 'description', 'url', 'content', 'user_id'], 1)
-                logger.info("✅ Google Sheets headers created")
+                # 🆕 새로운 컬럼 구조
+                gsheet_worksheet.insert_row([
+                    'timestamp', 'title', 'description', 'url',
+                    'is_relevant', 'relevance_score', 'keywords', 'region',
+                    'has_price', 'has_policy', 'reason', 'user_id'
+                ], 1)
+                logger.info("✅ Google Sheets headers created (with filtering columns)")
             else:
                 logger.info(f"✅ Google Sheets headers found: {headers}")
         except Exception as e:
-            gsheet_worksheet.insert_row(['timestamp', 'title', 'description', 'url', 'content', 'user_id'], 1)
-            logger.info("✅ Google Sheets headers created")
+            # 🆕 새로운 컬럼 구조
+            gsheet_worksheet.insert_row([
+                'timestamp', 'title', 'description', 'url',
+                'is_relevant', 'relevance_score', 'keywords', 'region',
+                'has_price', 'has_policy', 'reason', 'user_id'
+            ], 1)
+            logger.info("✅ Google Sheets headers created (with filtering columns)")
         
         logger.info(f"✅ Google Sheets initialized: {GOOGLE_SHEETS_SPREADSHEET_ID}")
         return True
@@ -188,7 +206,12 @@ def init_csv_file():
         if not os.path.exists(CSV_FILE_PATH):
             with open(CSV_FILE_PATH, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
-                writer.writerow(['timestamp', 'title', 'description', 'url', 'content', 'user_id'])
+                # 🆕 새로운 컬럼 구조
+                writer.writerow([
+                    'timestamp', 'title', 'description', 'url',
+                    'is_relevant', 'relevance_score', 'keywords', 'region',
+                    'has_price', 'has_policy', 'reason', 'user_id'
+                ])
             logger.info(f"✅ CSV file created: {CSV_FILE_PATH}")
         else:
             logger.info(f"✅ CSV file exists: {CSV_FILE_PATH}")
@@ -198,16 +221,23 @@ def init_csv_file():
         return False
 
 def save_news_to_csv(news_data: dict):
-    """Save news to CSV file"""
+    """Save news to CSV file with filtering metadata"""
     try:
         with open(CSV_FILE_PATH, 'a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
+            # 🆕 새로운 컬럼 구조
             writer.writerow([
                 news_data['timestamp'],
                 news_data['title'],
                 news_data['description'],
                 news_data['url'],
-                news_data['content'],
+                news_data.get('is_relevant', True),
+                news_data.get('relevance_score', 0),
+                ', '.join(news_data.get('keywords', [])),
+                news_data.get('region', ''),
+                news_data.get('has_price', False),
+                news_data.get('has_policy', False),
+                news_data.get('reason', ''),
                 news_data['user_id']
             ])
         logger.info(f"✅ News saved to CSV: {news_data['title'][:30]}...")
@@ -217,18 +247,25 @@ def save_news_to_csv(news_data: dict):
         return False
 
 def save_news_to_gsheet(news_data: dict):
-    """Save news to Google Sheets"""
+    """Save news to Google Sheets with filtering metadata"""
     if not gsheet_worksheet:
         logger.warning("⚠️ Google Sheets not initialized - skipping")
         return False
     
     try:
+        # 🆕 새로운 컬럼 구조
         gsheet_worksheet.append_row([
             news_data['timestamp'],
             news_data['title'],
             news_data['description'],
             news_data['url'],
-            news_data['content'],
+            news_data.get('is_relevant', True),
+            news_data.get('relevance_score', 0),
+            ', '.join(news_data.get('keywords', [])),
+            news_data.get('region', ''),
+            news_data.get('has_price', False),
+            news_data.get('has_policy', False),
+            news_data.get('reason', ''),
             news_data['user_id']
         ])
         logger.info(f"✅ News saved to Google Sheets: {news_data['title'][:30]}...")
@@ -294,7 +331,7 @@ except Exception as e:
 # ================================================================================
 
 def search_naver_news(query: str = "부동산", display: int = 10) -> Optional[list]:
-    """네이버 뉴스 API로 최신 뉴스 검색 - 네이버 뉴스 도메인만 (리스트 반환)"""
+    """네이버 뉴스 API로 최신 뉴스 검색 + 부동산 관련성 필터링"""
     url = "https://openapi.naver.com/v1/search/news.json"
     
     headers = {
@@ -351,10 +388,22 @@ def search_naver_news(query: str = "부동산", display: int = 10) -> Optional[l
                 "title": title,
                 "description": description,
                 "link": item['link'],
-                "pubDate": item['pubDate']
+                "pubDate": item['pubDate'],
+                "timestamp": datetime.now().isoformat()
             })
         
-        return processed_items
+        # 🆕 부동산 관련성 필터링
+        if NEWS_FILTER_AVAILABLE:
+            logger.info(f"🔍 필터링 시작: {len(processed_items)}개 기사")
+            filtered_items = filter_news_batch(processed_items)
+            logger.info(
+                f"✅ 필터링 완료: {len(processed_items)}개 중 {len(filtered_items)}개 관련 기사 "
+                f"({len(filtered_items)/len(processed_items)*100:.1f}%)"
+            )
+            return filtered_items
+        else:
+            logger.warning("⚠️ 필터링 모듈 없음 - 모든 기사 반환")
+            return processed_items
         
     except Exception as e:
         logger.error(f"❌ 뉴스 검색 오류: {e}")
@@ -985,7 +1034,7 @@ async def news_bot(request: RequestBody):
         }
 
 async def save_all_news_background(news_items: list, user_id: str):
-    """백그라운드에서 모든 뉴스 저장"""
+    """백그라운드에서 모든 뉴스 저장 (필터링 메타데이터 포함)"""
     logger.info(f"🔄 백그라운드 저장 시작: {len(news_items)}개")
     saved_count = 0
     
@@ -995,25 +1044,22 @@ async def save_all_news_background(news_items: list, user_id: str):
             if idx > 0:
                 await asyncio.sleep(2)
             
-            # 크롤링
-            news_content = crawl_news_content(news_item['link'])
+            # 🆕 필터링 메타데이터가 이미 포함되어 있음
+            # search_naver_news에서 filter_news_batch를 통해 추가됨
             
-            # 실패 시 건너뛰기
-            if "본문을 가져올 수 없습니다" in news_content:
-                logger.warning(f"⚠️ [{idx+1}/{len(news_items)}] 크롤링 실패")
-                continue
+            # user_id 추가
+            news_item['user_id'] = user_id
             
-            # 저장
-            save_news_log(
-                title=news_item['title'],
-                description=news_item['description'],
-                url=news_item['link'],
-                content=news_content,
-                user_id=user_id
-            )
+            # 저장 (필터링 정보 포함)
+            save_news_to_csv(news_item)
+            save_news_to_gsheet(news_item)
             
             saved_count += 1
-            logger.info(f"✅ [{saved_count}/{len(news_items)}] 저장 완료: {news_item['title'][:30]}...")
+            logger.info(
+                f"✅ [{saved_count}/{len(news_items)}] 저장 완료 "
+                f"[{news_item.get('relevance_score', 0)}점] "
+                f"{news_item['title'][:30]}..."
+            )
             
         except Exception as e:
             logger.error(f"❌ 뉴스 {idx+1} 저장 실패: {e}")
@@ -1188,7 +1234,7 @@ async def retry_failed_requests():
 async def startup_event():
     """Initialize resources on startup"""
     logger.info("="*70)
-    logger.info("🚀 Starting REXA server (Solar + RAG + News)...")
+    logger.info("🚀 Starting REXA server (Solar + RAG + News + Filtering)...")
     logger.info("="*70)
     
     # RAG 상태 확인
@@ -1204,17 +1250,24 @@ async def startup_event():
     else:
         logger.warning("⚠️ Naver News API not configured")
     
+    # 🆕 News Filtering 확인
+    if NEWS_FILTER_AVAILABLE:
+        logger.info("✅ News filtering system enabled")
+    else:
+        logger.warning("⚠️ News filtering system disabled")
+        logger.warning("   Place news_filter_simple.py in the same directory")
+    
     # CSV 초기화
     csv_success = init_csv_file()
     if csv_success:
-        logger.info("✅ CSV logging enabled")
+        logger.info("✅ CSV logging enabled (with filtering columns)")
     else:
         logger.warning("⚠️ CSV logging disabled")
     
     # Google Sheets 초기화
     gsheet_success = init_google_sheets()
     if gsheet_success:
-        logger.info("✅ Google Sheets logging enabled")
+        logger.info("✅ Google Sheets logging enabled (with filtering columns)")
     else:
         logger.warning("⚠️ Google Sheets logging disabled")
     
@@ -1231,6 +1284,7 @@ async def startup_event():
     logger.info(f"   - RAG chunks: {len(chunk_embeddings)}")
     logger.info(f"   - Redis: {'connected' if redis_client else 'in-memory queue'}")
     logger.info(f"   - News API: {'enabled' if NAVER_CLIENT_ID else 'disabled'}")
+    logger.info(f"   - News Filter: {'enabled' if NEWS_FILTER_AVAILABLE else 'disabled'}")
     logger.info(f"   - CSV logging: {'enabled' if csv_success else 'disabled'}")
     logger.info(f"   - Google Sheets: {'enabled' if gsheet_success else 'disabled'}")
     logger.info("="*70)
