@@ -1044,11 +1044,22 @@ async def save_all_news_background(news_items: list, user_id: str):
             if idx > 0:
                 await asyncio.sleep(2)
             
-            # 🆕 필터링 메타데이터가 이미 포함되어 있음
-            # search_naver_news에서 filter_news_batch를 통해 추가됨
+            # 🆕 키 이름 통일 (link → url)
+            if 'link' in news_item and 'url' not in news_item:
+                news_item['url'] = news_item['link']
             
             # user_id 추가
             news_item['user_id'] = user_id
+            
+            # 필터링 메타데이터가 없는 경우 기본값 설정
+            if 'is_relevant' not in news_item:
+                news_item['is_relevant'] = True
+                news_item['relevance_score'] = 50
+                news_item['keywords'] = []
+                news_item['region'] = ''
+                news_item['has_price'] = False
+                news_item['has_policy'] = False
+                news_item['reason'] = 'Filtering module not available'
             
             # 저장 (필터링 정보 포함)
             save_news_to_csv(news_item)
@@ -1063,6 +1074,7 @@ async def save_all_news_background(news_items: list, user_id: str):
             
         except Exception as e:
             logger.error(f"❌ 뉴스 {idx+1} 저장 실패: {e}")
+            logger.error(f"   news_item keys: {news_item.keys()}")
             continue
     
     logger.info(f"🎉 백그라운드 저장 완료: {saved_count}개")
