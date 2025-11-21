@@ -872,7 +872,7 @@ async def generate(request: RequestBody):
 
 @app.post("/news")
 async def news_bot(request: RequestBody):
-    """부동산 뉴스봇 - 사용자에게는 1개 표시, 백그라운드에서 10개 저장"""
+    """부동산 뉴스봇 - 즉시 응답 후 백그라운드에서 저장"""
     request_id = str(uuid.uuid4())
     
     logger.info("="*50)
@@ -885,7 +885,7 @@ async def news_bot(request: RequestBody):
         user_info = user_request.get("user", {})
         user_id = user_info.get("id", "default")
         
-        # 네이버 뉴스 검색 (5개로 줄여서 타임아웃 방지)
+        # 네이버 뉴스 검색 (5개)
         news_items = search_naver_news("부동산", display=5)
         
         if not news_items or len(news_items) == 0:
@@ -898,13 +898,13 @@ async def news_bot(request: RequestBody):
                 }
             }
         
-        logger.info(f"📊 총 {len(news_items)}개 뉴스 발견 - 모두 크롤링 시작")
+        logger.info(f"📊 총 {len(news_items)}개 뉴스 발견")
         
-        # 첫 번째 뉴스 (사용자에게 표시할 뉴스)
+        # 첫 번째 뉴스만 즉시 크롤링 (사용자 응답용)
         first_news = news_items[0]
         first_news_content = crawl_news_content(first_news['link'])
         
-        # 세션에 저장 (질의응답용 - 첫 번째 뉴스만)
+        # 세션에 저장 (질의응답용)
         news_sessions[user_id] = {
             "title": first_news['title'],
             "description": first_news['description'],
@@ -913,44 +913,9 @@ async def news_bot(request: RequestBody):
             "timestamp": datetime.now().isoformat()
         }
         
-        logger.info(f"✅ 첫 번째 뉴스 (표시용): {first_news['title'][:50]}...")
+        logger.info(f"✅ 첫 번째 뉴스: {first_news['title'][:50]}...")
         
-        # 모든 뉴스 크롤링 및 저장 (백그라운드)
-        saved_count = 0
-        for idx, news_item in enumerate(news_items):
-            try:
-                # Rate Limit 방지: 각 크롤링 사이에 2초 대기 (429 방지)
-                if idx > 0:  # 첫 번째는 이미 크롤링했으므로
-                    logger.info(f"⏳ 2초 대기 (Rate Limit 방지)...")
-                    time.sleep(2)
-                
-                # 크롤링
-                news_content = crawl_news_content(news_item['link'])
-                
-                # 크롤링 실패한 경우 건너뛰기
-                if "본문을 가져올 수 없습니다" in news_content:
-                    logger.warning(f"⚠️ [{idx+1}/{len(news_items)}] 크롤링 실패 - 건너뛰기")
-                    continue
-                
-                # 저장 (CSV + Google Sheets)
-                save_news_log(
-                    title=news_item['title'],
-                    description=news_item['description'],
-                    url=news_item['link'],
-                    content=news_content,
-                    user_id=user_id
-                )
-                
-                saved_count += 1
-                logger.info(f"✅ [{saved_count}/{len(news_items)}] 저장 완료: {news_item['title'][:30]}...")
-                
-            except Exception as e:
-                logger.error(f"❌ 뉴스 {idx+1} 저장 실패: {e}")
-                continue
-        
-        logger.info(f"🎉 총 {saved_count}개 뉴스 저장 완료!")
-        
-        # Solar AI로 첫 번째 뉴스 요약 생성
+        # Solar AI 요약 생성
         try:
             summary_prompt = f"다음 뉴스를 3-4개의 완전한 문장으로 요약해주세요. 문장 중간에 끊기지 않도록 주의하세요.\n\n제목: {first_news['title']}\n\n본문: {first_news_content[:1500]}"
             
@@ -965,24 +930,26 @@ async def news_bot(request: RequestBody):
             )
             
             summary = response.choices[0].message.content.strip()
-            logger.info(f"✅ Solar AI summary generated: {summary[:50]}...")
+            logger.info(f"✅ Solar AI summary generated")
             
         except Exception as e:
             logger.error(f"❌ Summary generation failed: {e}")
-            # 폴백: 네이버 description 사용
             summary = first_news['description']
             last_period = summary.rfind('.')
             if last_period > 0:
                 summary = summary[:last_period + 1]
         
-        # 사용자에게는 첫 번째 뉴스만 표시
+        # 백그라운드 작업: 모든 뉴스 저장 (비동기)
+        asyncio.create_task(save_all_news_background(news_items, user_id))
+        
+        # 사용자에게 즉시 응답
         return {
             "version": "2.0",
             "template": {
                 "outputs": [
                     {
                         "simpleText": {
-                            "text": f"📰 {first_news['title']}\n\n{summary}\n\n🔗 {first_news['link']}\n\n💬 이 뉴스에 대해 궁금한 점을 물어보세요!\n\n✨ 총 {saved_count}개의 최신 뉴스를 저장했습니다."
+                            "text": f"📰 {first_news['title']}\n\n{summary}\n\n🔗 {first_news['link']}\n\n💬 이 뉴스에 대해 궁금한 점을 물어보세요!"
                         }
                     }
                 ],
@@ -1016,6 +983,43 @@ async def news_bot(request: RequestBody):
                 ]
             }
         }
+
+async def save_all_news_background(news_items: list, user_id: str):
+    """백그라운드에서 모든 뉴스 저장"""
+    logger.info(f"🔄 백그라운드 저장 시작: {len(news_items)}개")
+    saved_count = 0
+    
+    for idx, news_item in enumerate(news_items):
+        try:
+            # Rate Limit 방지
+            if idx > 0:
+                await asyncio.sleep(2)
+            
+            # 크롤링
+            news_content = crawl_news_content(news_item['link'])
+            
+            # 실패 시 건너뛰기
+            if "본문을 가져올 수 없습니다" in news_content:
+                logger.warning(f"⚠️ [{idx+1}/{len(news_items)}] 크롤링 실패")
+                continue
+            
+            # 저장
+            save_news_log(
+                title=news_item['title'],
+                description=news_item['description'],
+                url=news_item['link'],
+                content=news_content,
+                user_id=user_id
+            )
+            
+            saved_count += 1
+            logger.info(f"✅ [{saved_count}/{len(news_items)}] 저장 완료: {news_item['title'][:30]}...")
+            
+        except Exception as e:
+            logger.error(f"❌ 뉴스 {idx+1} 저장 실패: {e}")
+            continue
+    
+    logger.info(f"🎉 백그라운드 저장 완료: {saved_count}개")
 
 @app.post("/custom")
 async def generate_custom(request: RequestBody):
