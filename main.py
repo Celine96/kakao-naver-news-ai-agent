@@ -117,16 +117,30 @@ def init_google_sheets():
     global gsheet_client, gsheet_worksheet
     
     if not GSPREAD_AVAILABLE:
-        logger.warning("⚠️ gspread not installed - Google Sheets logging disabled")
+        logger.error("❌ gspread not installed - Google Sheets logging disabled")
+        logger.error("   Install: pip install gspread google-auth --break-system-packages")
         return False
     
-    if not GOOGLE_SHEETS_CREDENTIALS or not GOOGLE_SHEETS_SPREADSHEET_ID:
-        logger.warning("⚠️ Google Sheets credentials not set - logging disabled")
+    if not GOOGLE_SHEETS_CREDENTIALS:
+        logger.error("❌ GOOGLE_SHEETS_CREDENTIALS environment variable not set")
+        logger.error("   Set in Render: Environment → GOOGLE_SHEETS_CREDENTIALS")
+        return False
+    
+    if not GOOGLE_SHEETS_SPREADSHEET_ID:
+        logger.error("❌ GOOGLE_SHEETS_SPREADSHEET_ID environment variable not set")
+        logger.error("   Set in Render: Environment → GOOGLE_SHEETS_SPREADSHEET_ID")
         return False
     
     try:
+        logger.info("🔄 Initializing Google Sheets...")
+        
         # JSON 문자열을 딕셔너리로 파싱
-        creds_dict = json.loads(GOOGLE_SHEETS_CREDENTIALS)
+        try:
+            creds_dict = json.loads(GOOGLE_SHEETS_CREDENTIALS)
+            logger.info("✅ Credentials JSON parsed successfully")
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Invalid JSON in GOOGLE_SHEETS_CREDENTIALS: {e}")
+            return False
         
         # Credentials 생성
         scopes = [
@@ -134,13 +148,16 @@ def init_google_sheets():
             'https://www.googleapis.com/auth/drive'
         ]
         credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        logger.info("✅ Google credentials created")
         
         # gspread 클라이언트 생성
         gsheet_client = gspread.authorize(credentials)
+        logger.info("✅ gspread client authorized")
         
         # 스프레드시트 열기
         spreadsheet = gsheet_client.open_by_key(GOOGLE_SHEETS_SPREADSHEET_ID)
         gsheet_worksheet = spreadsheet.sheet1
+        logger.info(f"✅ Spreadsheet opened: {spreadsheet.title}")
         
         # 헤더 확인 및 생성
         try:
@@ -148,6 +165,8 @@ def init_google_sheets():
             if not headers or headers[0] != 'timestamp':
                 gsheet_worksheet.insert_row(['timestamp', 'title', 'description', 'url', 'content', 'user_id'], 1)
                 logger.info("✅ Google Sheets headers created")
+            else:
+                logger.info(f"✅ Google Sheets headers found: {headers}")
         except Exception as e:
             gsheet_worksheet.insert_row(['timestamp', 'title', 'description', 'url', 'content', 'user_id'], 1)
             logger.info("✅ Google Sheets headers created")
@@ -156,7 +175,9 @@ def init_google_sheets():
         return True
         
     except Exception as e:
-        logger.error(f"❌ Failed to initialize Google Sheets: {e}")
+        logger.error(f"❌ Failed to initialize Google Sheets: {type(e).__name__}: {e}")
+        import traceback
+        logger.error(f"   Traceback: {traceback.format_exc()}")
         return False
 
 def init_csv_file():
@@ -339,41 +360,52 @@ def search_naver_news(query: str = "부동산", display: int = 10) -> Optional[l
         return None
 
 def crawl_news_content(url: str) -> str:
-    """뉴스 URL에서 본문 추출 - 전체 원문"""
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, 'lxml')
-        
-        # 네이버 뉴스 본문 추출
-        if 'news.naver.com' in url:
-            article = soup.select_one('#dic_area') or soup.select_one('#articeBody') or soup.select_one('.news_end')
-            if article:
-                # 불필요한 태그 제거
-                for tag in article.find_all(['script', 'style', 'aside']):
-                    tag.decompose()
-                content = article.get_text(strip=True, separator='\n')
+    """뉴스 URL에서 본문 추출 - 전체 원문 (재시도 포함)"""
+    max_retries = 2
+    
+    for attempt in range(max_retries):
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            response = requests.get(url, headers=headers, timeout=15)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, 'lxml')
+            
+            # 네이버 뉴스 본문 추출
+            if 'news.naver.com' in url:
+                article = soup.select_one('#dic_area') or soup.select_one('#articeBody') or soup.select_one('.news_end')
+                if article:
+                    # 불필요한 태그 제거
+                    for tag in article.find_all(['script', 'style', 'aside']):
+                        tag.decompose()
+                    content = article.get_text(strip=True, separator='\n')
+                    logger.info(f"📄 크롤링 성공: {len(content)}자")
+                    return content  # 전체 원문 반환 (제한 없음)
+            
+            # 일반 뉴스 사이트 - p 태그 기반 추출
+            paragraphs = soup.find_all('p')
+            content = '\n'.join([p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 50])
+            
+            if content:
                 logger.info(f"📄 크롤링 성공: {len(content)}자")
-                return content  # 전체 원문 반환 (제한 없음)
-        
-        # 일반 뉴스 사이트 - p 태그 기반 추출
-        paragraphs = soup.find_all('p')
-        content = '\n'.join([p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 50])
-        
-        if content:
-            logger.info(f"📄 크롤링 성공: {len(content)}자")
-            return content  # 전체 원문 반환
-        else:
-            return "본문을 추출할 수 없습니다."
-        
-    except Exception as e:
-        logger.error(f"❌ 크롤링 오류: {e}")
-        return "본문을 가져올 수 없습니다."
-
+                return content  # 전체 원문 반환
+            else:
+                return "본문을 추출할 수 없습니다."
+            
+        except requests.exceptions.Timeout:
+            if attempt < max_retries - 1:
+                logger.warning(f"⚠️ 타임아웃 발생 - 재시도 {attempt + 1}/{max_retries}")
+                continue
+            else:
+                logger.error(f"❌ 크롤링 타임아웃: {url[:50]}...")
+                return "본문을 가져올 수 없습니다. (타임아웃)"
+        except Exception as e:
+            logger.error(f"❌ 크롤링 오류: {e}")
+            return "본문을 가져올 수 없습니다."
+    
+    return "본문을 가져올 수 없습니다."
 # ================================================================================
 # RAG Helper Functions
 # ================================================================================
@@ -832,8 +864,8 @@ async def news_bot(request: RequestBody):
         user_info = user_request.get("user", {})
         user_id = user_info.get("id", "default")
         
-        # 네이버 뉴스 검색 (10개 가져오기)
-        news_items = search_naver_news("부동산", display=10)
+        # 네이버 뉴스 검색 (5개로 줄여서 타임아웃 방지)
+        news_items = search_naver_news("부동산", display=5)
         
         if not news_items or len(news_items) == 0:
             return {
