@@ -1111,6 +1111,21 @@ async def health_ping():
         "news_sessions": len(news_sessions)
     }
 
+@app.get("/debug/env")
+async def debug_env():
+    """환경 변수 체크 (디버깅용)"""
+    return {
+        "google_sheets_credentials_exists": bool(GOOGLE_SHEETS_CREDENTIALS),
+        "google_sheets_credentials_length": len(GOOGLE_SHEETS_CREDENTIALS) if GOOGLE_SHEETS_CREDENTIALS else 0,
+        "google_sheets_spreadsheet_id_exists": bool(GOOGLE_SHEETS_SPREADSHEET_ID),
+        "google_sheets_spreadsheet_id": GOOGLE_SHEETS_SPREADSHEET_ID if GOOGLE_SHEETS_SPREADSHEET_ID else "NOT_SET",
+        "gspread_available": GSPREAD_AVAILABLE,
+        "gsheet_client_initialized": gsheet_client is not None,
+        "gsheet_worksheet_initialized": gsheet_worksheet is not None,
+        "naver_client_id_exists": bool(NAVER_CLIENT_ID),
+        "naver_client_secret_exists": bool(NAVER_CLIENT_SECRET)
+    }
+
 @app.get("/queue/status")
 async def queue_status():
     """Get detailed queue status"""
