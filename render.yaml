@@ -1,5 +1,7 @@
 services:
-  # A Docker web service
+  # ========================================
+  # 1. 카카오톡 봇 서버 (24시간 실행)
+  # ========================================
   - type: web
     name: kakao-solar-news-ai-chatbot
     runtime: python
@@ -7,3 +9,42 @@ services:
     autoDeploy: false
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: UPSTAGE_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: NAVER_CLIENT_ID
+        sync: false
+      - key: NAVER_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_SHEETS_CREDENTIALS
+        sync: false
+      - key: GOOGLE_SHEETS_SPREADSHEET_ID
+        sync: false
+      - key: API_TIMEOUT
+        value: "3"
+      - key: HEALTH_CHECK_INTERVAL
+        value: "5"
+
+  # ========================================
+  # 2. 자동 크롤러 (1시간마다 실행)
+  # ========================================
+  - type: cron
+    name: rexa-crawler-hourly
+    runtime: python
+    plan: free
+    schedule: "0 * * * *"  # 매시 0분에 실행 (예: 09:00, 10:00, 11:00...)
+    buildCommand: pip install -r requirements.txt
+    startCommand: python crawler.py
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: NAVER_CLIENT_ID
+        sync: false
+      - key: NAVER_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_SHEETS_CREDENTIALS
+        sync: false
+      - key: GOOGLE_SHEETS_SPREADSHEET_ID
+        sync: false
