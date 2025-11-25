@@ -197,14 +197,15 @@ def extract_region(text: str) -> str:
     return None
 
 def filter_news_batch(news_items: list) -> list:
-    """여러 뉴스 기사를 배치로 필터링"""
+    """여러 뉴스 기사를 배치로 필터링 (75점 이상만)"""
     filtered = []
     
     for item in news_items:
         result = filter_real_estate_news(item['title'], item['description'])
         item.update(result)
         
-        if result['is_relevant']:
+        # 부동산 관련 + 75점 이상만 통과
+        if result['is_relevant'] and result.get('relevance_score', 0) >= 75:
             filtered.append(item)
     
     return filtered
@@ -275,11 +276,11 @@ def search_naver_news(query: str = "부동산", display: int = 10) -> Optional[l
                 "timestamp": datetime.now().isoformat()
             })
         
-        # 부동산 관련성 필터링
+        # 부동산 관련성 필터링 (75점 이상만)
         logger.info(f"🔍 필터링 시작: {len(processed_items)}개 기사")
         filtered_items = filter_news_batch(processed_items)
         logger.info(
-            f"✅ 필터링 완료: {len(processed_items)}개 중 {len(filtered_items)}개 관련 기사 "
+            f"✅ 필터링 완료: {len(processed_items)}개 중 {len(filtered_items)}개 선정 (75점 이상) "
             f"({len(filtered_items)/len(processed_items)*100:.1f}%)"
         )
         return filtered_items
