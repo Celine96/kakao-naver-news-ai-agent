@@ -20,13 +20,192 @@ import pickle
 import requests
 from bs4 import BeautifulSoup
 
-# 🆕 뉴스 필터링 시스템
-try:
-    from news_filter_simple import filter_real_estate_news, filter_news_batch
-    NEWS_FILTER_AVAILABLE = True
-except ImportError:
-    NEWS_FILTER_AVAILABLE = False
-    logging.warning("⚠️ news_filter_simple.py not found - filtering disabled")
+# ================================================================================
+# 🆕 뉴스 필터링 시스템 (내장)
+# ================================================================================
+
+def filter_real_estate_news(title: str, description: str) -> dict:
+    """
+    기사가 부동산과 관련이 있는지 GPT로 판단하고 핵심 지표 추출
+    
+    Returns:
+        {
+            'is_relevant': bool,           # 부동산 관련 여부
+            'relevance_score': int,        # 관련도 점수 (0-100)
+            'keywords': list,              # 핵심 키워드 3-5개
+            'region': str or None,         # 지역
+            'has_price': bool,             # 가격 정보 포함 여부
+            'has_policy': bool,            # 정책 관련 여부
+            'reason': str                  # 판단 근거
+        }
+    """
+    
+    # OpenAI API Key 확인
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    if not openai_api_key:
+        logging.warning("⚠️ OPENAI_API_KEY not set - using keyword filtering")
+        return filter_by_keywords(title, description)
+    
+    system_prompt = """당신은 부동산 뉴스 필터링 전문가입니다.
+
+기사 제목과 설명을 보고 이것이 "부동산과 관련이 있는지" 판단하세요.
+
+✅ 부동산 관련 기사:
+- 아파트, 오피스텔, 상가, 토지 등 부동산 매매/임대
+- 부동산 가격, 시세, 거래량
+- 부동산 정책, 세금, 대출, 금리
+- 재건축, 재개발, 분양, 청약
+- 부동산 투자, 수익형 부동산
+
+❌ 부동산 무관 기사:
+- 주식, 채권, 코인 등 금융상품
+- 일반 경제 뉴스 (부동산 언급 없음)
+- 정치, 사회, 문화 이슈
+- 건설사 실적이지만 부동산과 직접 연관 없음
+
+JSON 형식으로 응답:
+{
+  "is_relevant": true/false,
+  "relevance_score": 0-100,
+  "keywords": ["키워드1", "키워드2", "키워드3"],
+  "region": "지역명" or null,
+  "has_price": true/false,
+  "has_policy": true/false,
+  "reason": "판단 근거 1-2줄"
+}"""
+
+    user_prompt = f"""제목: {title}
+설명: {description}
+
+이 기사가 부동산과 관련이 있습니까?"""
+
+    try:
+        # GPT-4o-mini로 필터링
+        openai_client_filter = OpenAI(api_key=openai_api_key)
+        response = openai_client_filter.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.1,
+            response_format={"type": "json_object"},
+            timeout=10
+        )
+        
+        result = json.loads(response.choices[0].message.content)
+        
+        # 로깅
+        status = "✅ 관련" if result['is_relevant'] else "❌ 무관"
+        logging.info(f"{status} (점수: {result['relevance_score']}) - {title[:40]}...")
+        
+        return result
+        
+    except Exception as e:
+        logging.error(f"❌ GPT 필터링 실패: {e}")
+        # 폴백: 키워드 기반
+        return filter_by_keywords(title, description)
+
+def filter_by_keywords(title: str, description: str) -> dict:
+    """키워드 기반 간단 필터링 (GPT 실패 시 폴백)"""
+    text = (title + " " + description).lower()
+    
+    # 부동산 핵심 키워드
+    real_estate_keywords = [
+        "아파트", "오피스텔", "빌딩", "상가", "토지", "주택",
+        "매매", "전세", "월세", "분양", "청약", "입주",
+        "재건축", "재개발", "정비구역", "부동산", "집값",
+        "주택가격", "전세가", "시세", "주담대", "종부세",
+        "양도세", "취득세", "국토부", "미분양"
+    ]
+    
+    # 제외 키워드
+    exclude_keywords = ["주식", "코인", "비트코인", "펀드", "채권"]
+    
+    # 매칭 개수 계산
+    matched = sum(1 for kw in real_estate_keywords if kw in text)
+    excluded = sum(1 for kw in exclude_keywords if kw in text)
+    
+    # 점수 계산
+    score = max(0, min(100, matched * 30 - excluded * 20))
+    is_relevant = score >= 30
+    
+    # 간단한 키워드 추출
+    keywords = [kw for kw in real_estate_keywords if kw in text][:5]
+    
+    # 지역 추출
+    region = extract_region(text)
+    
+    logging.info(f"🔑 키워드 필터 (점수: {score}) - {title[:40]}...")
+    
+    return {
+        'is_relevant': is_relevant,
+        'relevance_score': score,
+        'keywords': keywords,
+        'region': region,
+        'has_price': any(kw in text for kw in ['가격', '시세', '억', '만원', '상승', '하락']),
+        'has_policy': any(kw in text for kw in ['정책', '규제', '세금', '대출', '금리']),
+        'reason': f'키워드 매칭 기반 ({matched}개 매칭)'
+    }
+
+def extract_region(text: str) -> str:
+    """텍스트에서 지역 정보 추출"""
+    # 서울 25개구
+    seoul_gu = [
+        "강남구", "강동구", "강북구", "강서구", "관악구",
+        "광진구", "구로구", "금천구", "노원구", "도봉구",
+        "동대문구", "동작구", "마포구", "서대문구", "서초구",
+        "성동구", "성북구", "송파구", "양천구", "영등포구",
+        "용산구", "은평구", "종로구", "중구", "중랑구"
+    ]
+    
+    # 경기 주요 시
+    gyeonggi_cities = [
+        "성남시", "용인시", "수원시", "고양시", "화성시",
+        "평택시", "부천시", "안양시", "남양주시"
+    ]
+    
+    # 광역시
+    metropolitan = ["인천", "부산", "대구", "대전", "광주", "울산", "세종"]
+    
+    # 우선순위: 구 > 시 > 광역
+    for gu in seoul_gu:
+        if gu in text:
+            return f"서울 {gu}"
+    
+    for city in gyeonggi_cities:
+        if city in text:
+            return f"경기 {city}"
+    
+    for metro in metropolitan:
+        if metro in text:
+            return metro
+    
+    return None
+
+def filter_news_batch(news_items: list) -> list:
+    """
+    여러 뉴스 기사를 배치로 필터링
+    is_relevant=True인 기사만 반환
+    """
+    filtered = []
+    
+    for item in news_items:
+        result = filter_real_estate_news(item['title'], item['description'])
+        
+        # 필터링 결과를 원본 item에 병합
+        item.update(result)
+        
+        # 관련 기사만 추가
+        if result['is_relevant']:
+            filtered.append(item)
+    
+    return filtered
+
+# 필터링 시스템 활성화 플래그
+NEWS_FILTER_AVAILABLE = True
+logging.info("✅ 뉴스 필터링 시스템 내장 (GPT-4o-mini)")
+
 
 # Google Sheets용
 try:
@@ -1263,11 +1442,15 @@ async def startup_event():
         logger.warning("⚠️ Naver News API not configured")
     
     # 🆕 News Filtering 확인
+    openai_key_exists = bool(os.getenv("OPENAI_API_KEY"))
     if NEWS_FILTER_AVAILABLE:
-        logger.info("✅ News filtering system enabled")
+        if openai_key_exists:
+            logger.info("✅ News filtering system enabled (GPT-4o-mini)")
+        else:
+            logger.warning("⚠️ OPENAI_API_KEY not set - will use keyword filtering")
+            logger.warning("   Set OPENAI_API_KEY for GPT-based filtering")
     else:
         logger.warning("⚠️ News filtering system disabled")
-        logger.warning("   Place news_filter_simple.py in the same directory")
     
     # CSV 초기화
     csv_success = init_csv_file()
@@ -1296,7 +1479,7 @@ async def startup_event():
     logger.info(f"   - RAG chunks: {len(chunk_embeddings)}")
     logger.info(f"   - Redis: {'connected' if redis_client else 'in-memory queue'}")
     logger.info(f"   - News API: {'enabled' if NAVER_CLIENT_ID else 'disabled'}")
-    logger.info(f"   - News Filter: {'enabled' if NEWS_FILTER_AVAILABLE else 'disabled'}")
+    logger.info(f"   - News Filter: {'GPT' if openai_key_exists else 'keyword'} (built-in)")
     logger.info(f"   - CSV logging: {'enabled' if csv_success else 'disabled'}")
     logger.info(f"   - Google Sheets: {'enabled' if gsheet_success else 'disabled'}")
     logger.info("="*70)
