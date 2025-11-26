@@ -20,8 +20,7 @@ import pickle
 
 # 공통 함수 임포트
 from common import (
-    search_naver_news,
-    crawl_news_content,
+    get_latest_news_from_gsheet,
     save_all_news_background,
     init_google_sheets,
     init_csv_file
@@ -441,7 +440,7 @@ async def process_solar_rag_request(request_body: dict) -> dict:
 
 @app.post("/news")
 async def news_bot(request: RequestBody):
-    """부동산 뉴스봇 - 사용자 요청 시"""
+    """부동산 뉴스봇 - 구글 시트에서 조회 (초고속)"""
     request_id = str(uuid.uuid4())
     
     logger.info("=" * 50)
@@ -454,20 +453,21 @@ async def news_bot(request: RequestBody):
         user_info = user_request.get("user", {})
         user_id = user_info.get("id", "default")
         
-        # 네이버 뉴스 검색 (20개)
-        news_items = search_naver_news("부동산", display=20)
+        # 구글 시트에서 최신 뉴스 조회 (0.1초)
+        news_items = get_latest_news_from_gsheet(limit=5)
         
         if not news_items or len(news_items) == 0:
+            logger.warning("⚠️ 구글 시트에 뉴스 없음")
             return {
                 "version": "2.0",
                 "template": {
                     "outputs": [
-                        {"simpleText": {"text": "뉴스를 불러올 수 없습니다. 잠시 후 다시 시도해주세요."}}
+                        {"simpleText": {"text": "최신 뉴스를 준비 중입니다. 잠시 후 다시 시도해주세요."}}
                     ]
                 }
             }
         
-        logger.info(f"📊 필터링 완료: 총 {len(news_items)}개 부동산 관련 뉴스")
+        logger.info(f"✅ 구글 시트 조회 완료: {len(news_items)}개")
         
         # 상위 3개 로깅
         for idx, item in enumerate(news_items[:3]):
@@ -477,62 +477,27 @@ async def news_bot(request: RequestBody):
                 f"지역: {item.get('region', 'N/A')})"
             )
         
-        # 첫 번째 뉴스 크롤링
+        # 첫 번째 뉴스
         first_news = news_items[0]
-        
-        # Rate Limit 방지 재시도 로직
-        first_news_content = ""
-        max_retries = 2
-        for attempt in range(max_retries):
-            try:
-                first_news_content = crawl_news_content(first_news['link'])
-                if first_news_content and "본문을 가져올 수 없습니다" not in first_news_content:
-                    break
-                if attempt < max_retries - 1:
-                    logger.warning(f"⚠️ 크롤링 재시도 {attempt + 1}/{max_retries}")
-                    await asyncio.sleep(3)
-            except Exception as e:
-                logger.error(f"❌ 크롤링 시도 {attempt + 1} 실패: {e}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(3)
-                else:
-                    first_news_content = first_news['description']
         
         # 세션에 저장
         news_sessions[user_id] = {
             "title": first_news['title'],
             "description": first_news['description'],
-            "content": first_news_content,
+            "content": first_news.get('summary', first_news['description']),
             "url": first_news['link'],
             "timestamp": datetime.now().isoformat()
         }
         
-        # Solar AI 요약 생성
-        try:
-            summary_prompt = f"다음 뉴스를 3-4개의 완전한 문장으로 요약해주세요.\n\n제목: {first_news['title']}\n\n본문: {first_news_content[:1500]}"
-            
-            response = client.chat.completions.create(
-                model="solar-mini",
-                messages=[
-                    {"role": "system", "content": "당신은 부동산 뉴스 전문 요약 AI입니다."},
-                    {"role": "user", "content": summary_prompt}
-                ],
-                max_tokens=300,
-                timeout=API_TIMEOUT
-            )
-            
-            summary = response.choices[0].message.content.strip()
-            logger.info(f"✅ Solar AI summary generated")
-            
-        except Exception as e:
-            logger.error(f"❌ Summary generation failed: {e}")
-            summary = first_news['description']
-            last_period = summary.rfind('.')
-            if last_period > 0:
-                summary = summary[:last_period + 1]
+        # 요약 (이미 저장된 것 사용)
+        summary = first_news.get('summary', first_news['description'])
         
-        # 백그라운드 저장
-        asyncio.create_task(save_all_news_background(news_items, user_id))
+        # 마지막 마침표까지만
+        last_period = summary.rfind('.')
+        if last_period > 0:
+            summary = summary[:last_period + 1]
+        
+        logger.info(f"✅ 초고속 응답 완료 (0.1초)")
         
         # 카카오톡 응답
         return {
@@ -567,11 +532,13 @@ async def news_bot(request: RequestBody):
         
     except Exception as e:
         logger.error(f"❌ News bot error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return {
             "version": "2.0",
             "template": {
                 "outputs": [
-                    {"simpleText": {"text": "뉴스를 처리하는 중 오류가 발생했습니다. 다시 시도해주세요."}}
+                    {"simpleText": {"text": "뉴스를 불러오는 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."}}
                 ]
             }
         }
