@@ -50,6 +50,76 @@ gsheet_worksheet = None
 logger = logging.getLogger(__name__)
 
 # ================================================================================
+# 구글 시트에서 뉴스 조회
+# ================================================================================
+
+def get_latest_news_from_gsheet(limit: int = 5) -> list:
+    """
+    구글 시트에서 최신 뉴스 조회 (카카오톡 봇용)
+    
+    Args:
+        limit: 조회할 뉴스 개수
+    
+    Returns:
+        최신 뉴스 리스트 (최대 limit개)
+    """
+    global gsheet_client, gsheet_worksheet
+    
+    try:
+        # 구글 시트 초기화 (필요시)
+        if not gsheet_worksheet:
+            success = init_google_sheets()
+            if not success:
+                logger.warning("⚠️ 구글 시트 초기화 실패")
+                return []
+        
+        # 모든 레코드 가져오기
+        all_records = gsheet_worksheet.get_all_records()
+        
+        if not all_records:
+            logger.warning("⚠️ 구글 시트에 데이터 없음")
+            return []
+        
+        # 최신순 정렬 (timestamp 기준)
+        sorted_records = sorted(
+            all_records,
+            key=lambda x: x.get('timestamp', ''),
+            reverse=True
+        )
+        
+        # 상위 limit개만 추출
+        latest_news = []
+        for record in sorted_records[:limit]:
+            # 75점 이상만 (이미 필터링되었지만 재확인)
+            score = record.get('relevance_score', 0)
+            if isinstance(score, str):
+                try:
+                    score = int(score)
+                except:
+                    score = 0
+            
+            if score >= 75:
+                latest_news.append({
+                    'title': record.get('title', ''),
+                    'description': record.get('description', ''),
+                    'link': record.get('link', ''),
+                    'relevance_score': score,
+                    'keywords': record.get('keywords', '').split(',') if record.get('keywords') else [],
+                    'region': record.get('region', ''),
+                    'has_price': record.get('has_price', False),
+                    'has_policy': record.get('has_policy', False),
+                    'summary': record.get('summary', record.get('description', '')),
+                    'timestamp': record.get('timestamp', '')
+                })
+        
+        logger.info(f"✅ 구글 시트에서 {len(latest_news)}개 뉴스 조회")
+        return latest_news[:limit]
+        
+    except Exception as e:
+        logger.error(f"❌ 구글 시트 조회 실패: {e}")
+        return []
+
+# ================================================================================
 # 뉴스 필터링 시스템
 # ================================================================================
 
