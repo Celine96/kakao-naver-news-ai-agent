@@ -440,7 +440,7 @@ async def process_solar_rag_request(request_body: dict) -> dict:
 
 @app.post("/news")
 async def news_bot(request: RequestBody):
-    """부동산 뉴스봇 - 최신 5개 뉴스 제목-URL 제공"""
+    """부동산 뉴스봇 - 5개 뉴스 카드 형식"""
     request_id = str(uuid.uuid4())
     
     logger.info("=" * 50)
@@ -469,44 +469,58 @@ async def news_bot(request: RequestBody):
         
         logger.info(f"✅ 구글 시트 조회 완료: {len(news_items)}개")
         
-        # 뉴스 제목-URL 목록 생성
-        news_list_text = f"📰 오늘의 부동산 뉴스 (총 {len(news_items)}건)\n\n"
+        # 로깅
+        for idx, item in enumerate(news_items, 1):
+            logger.info(
+                f"   [{idx}] {item['title'][:40]}... "
+                f"(점수: {item.get('relevance_score', 0)})"
+            )
+        
+        # 5개 뉴스 카드 생성
+        carousel_items = []
         
         for idx, item in enumerate(news_items, 1):
             title = item['title']
+            description = item.get('description', '')
             url = item['link']
-            score = item.get('relevance_score', 0)
             
-            # 제목이 너무 길면 축약
-            if len(title) > 50:
-                title = title[:47] + "..."
+            # 설명이 너무 길면 축약 (300자)
+            if len(description) > 300:
+                description = description[:297] + "..."
             
-            news_list_text += f"{idx}. {title}\n   🔗 {url}\n\n"
-            
-            # 로깅
-            logger.info(f"   [{idx}] {title} (점수: {score})")
+            carousel_items.append({
+                "title": title,
+                "description": description,
+                "buttons": [
+                    {
+                        "label": "원문 보기",
+                        "action": "webLink",
+                        "webLinkUrl": url
+                    }
+                ]
+            })
         
-        # 첫 번째 뉴스 세션 저장 (대화 이어가기용)
-        if news_items:
-            first_news = news_items[0]
-            news_sessions[user_id] = {
-                "title": first_news['title'],
-                "description": first_news['description'],
-                "content": first_news.get('summary', first_news['description']),
-                "url": first_news['link'],
-                "timestamp": datetime.now().isoformat()
-            }
+        # 첫 번째 뉴스 세션에 저장 (대화 이어가기용)
+        first_news = news_items[0]
+        news_sessions[user_id] = {
+            "title": first_news['title'],
+            "description": first_news['description'],
+            "content": first_news.get('summary', first_news['description']),
+            "url": first_news['link'],
+            "timestamp": datetime.now().isoformat()
+        }
         
         logger.info(f"✅ 초고속 응답 완료 (0.1초)")
         
-        # 카카오톡 응답
+        # 카카오톡 응답 - Carousel (5개 뉴스 카드)
         return {
             "version": "2.0",
             "template": {
                 "outputs": [
                     {
-                        "simpleText": {
-                            "text": news_list_text.strip()
+                        "carousel": {
+                            "type": "basicCard",
+                            "items": carousel_items
                         }
                     }
                 ]
