@@ -440,7 +440,7 @@ async def process_solar_rag_request(request_body: dict) -> dict:
 
 @app.post("/news")
 async def news_bot(request: RequestBody):
-    """부동산 뉴스봇 - 구글 시트에서 조회 (초고속)"""
+    """부동산 뉴스봇 - 최신 5개 뉴스 제목-URL 제공"""
     request_id = str(uuid.uuid4())
     
     logger.info("=" * 50)
@@ -453,7 +453,7 @@ async def news_bot(request: RequestBody):
         user_info = user_request.get("user", {})
         user_id = user_info.get("id", "default")
         
-        # 구글 시트에서 최신 뉴스 조회 (0.1초)
+        # 구글 시트에서 최신 뉴스 5개 조회 (0.1초)
         news_items = get_latest_news_from_gsheet(limit=5)
         
         if not news_items or len(news_items) == 0:
@@ -469,33 +469,33 @@ async def news_bot(request: RequestBody):
         
         logger.info(f"✅ 구글 시트 조회 완료: {len(news_items)}개")
         
-        # 상위 3개 로깅
-        for idx, item in enumerate(news_items[:3]):
-            logger.info(
-                f"   [{idx+1}] {item['title'][:40]}... "
-                f"(점수: {item.get('relevance_score', 0)}, "
-                f"지역: {item.get('region', 'N/A')})"
-            )
+        # 뉴스 제목-URL 목록 생성
+        news_list_text = f"📰 오늘의 부동산 뉴스 (총 {len(news_items)}건)\n\n"
         
-        # 첫 번째 뉴스
-        first_news = news_items[0]
+        for idx, item in enumerate(news_items, 1):
+            title = item['title']
+            url = item['link']
+            score = item.get('relevance_score', 0)
+            
+            # 제목이 너무 길면 축약
+            if len(title) > 50:
+                title = title[:47] + "..."
+            
+            news_list_text += f"{idx}. {title}\n   🔗 {url}\n\n"
+            
+            # 로깅
+            logger.info(f"   [{idx}] {title} (점수: {score})")
         
-        # 세션에 저장
-        news_sessions[user_id] = {
-            "title": first_news['title'],
-            "description": first_news['description'],
-            "content": first_news.get('summary', first_news['description']),
-            "url": first_news['link'],
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        # 요약 (이미 저장된 것 사용)
-        summary = first_news.get('summary', first_news['description'])
-        
-        # 마지막 마침표까지만
-        last_period = summary.rfind('.')
-        if last_period > 0:
-            summary = summary[:last_period + 1]
+        # 첫 번째 뉴스 세션 저장 (대화 이어가기용)
+        if news_items:
+            first_news = news_items[0]
+            news_sessions[user_id] = {
+                "title": first_news['title'],
+                "description": first_news['description'],
+                "content": first_news.get('summary', first_news['description']),
+                "url": first_news['link'],
+                "timestamp": datetime.now().isoformat()
+            }
         
         logger.info(f"✅ 초고속 응답 완료 (0.1초)")
         
@@ -506,25 +506,8 @@ async def news_bot(request: RequestBody):
                 "outputs": [
                     {
                         "simpleText": {
-                            "text": f"📰 오늘의 부동산 뉴스 (총 {len(news_items)}건)\n\n【{first_news['title']}】\n\n{summary}\n\n💬 이 뉴스에 대해 궁금한 점을 물어보세요!"
+                            "text": news_list_text.strip()
                         }
-                    }
-                ],
-                "quickReplies": [
-                    {
-                        "label": "핵심 내용은?",
-                        "action": "message",
-                        "messageText": "이 뉴스의 핵심은 뭐야?"
-                    },
-                    {
-                        "label": "시장 영향은?",
-                        "action": "message",
-                        "messageText": "이게 부동산 시장에 어떤 영향을 줄까?"
-                    },
-                    {
-                        "label": "원문 보기",
-                        "action": "webLink",
-                        "webLinkUrl": first_news['link']
                     }
                 ]
             }
