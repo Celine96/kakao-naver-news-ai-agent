@@ -480,10 +480,11 @@ async def news_bot(request: RequestBody):
         news_list = f"📰 오늘의 부동산 뉴스 (총 {len(news_items)}건)\n\n"
         
         for idx, item in enumerate(news_items, 1):
-            title = item['title']  # 전체 제목 (축약 없음!)
-            url = item['link']      # 전체 URL (축약 없음!)
+            title = item['title']
+            url = item['link']
             
-            news_list += f"{idx}. {title}\n🔗 {url}\n\n"
+            # 제목 + URL (URL을 별도 줄에 표시)
+            news_list += f"{idx}. {title}\n{url}\n\n"
         
         # 첫 번째 뉴스 세션에 저장 (대화 이어가기용)
         first_news = news_items[0]
@@ -497,7 +498,7 @@ async def news_bot(request: RequestBody):
         
         logger.info(f"✅ 초고속 응답 완료 (0.1초)")
         
-        # 카카오톡 응답 - 간결한 리스트
+        # 카카오톡 응답 - simpleText (URL 포함)
         return {
             "version": "2.0",
             "template": {
