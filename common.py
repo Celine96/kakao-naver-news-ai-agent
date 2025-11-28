@@ -102,7 +102,7 @@ def get_latest_news_from_gsheet(limit: int = 5) -> list:
                 latest_news.append({
                     'title': record.get('title', ''),
                     'description': record.get('description', ''),
-                    'link': record.get('link', ''),
+                    'link': record.get('url', ''),  # ✅ 'url' 컬럼에서 읽음!
                     'relevance_score': score,
                     'keywords': record.get('keywords', '').split(',') if record.get('keywords') else [],
                     'region': record.get('region', ''),
