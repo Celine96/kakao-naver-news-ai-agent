@@ -440,7 +440,7 @@ async def process_solar_rag_request(request_body: dict) -> dict:
 
 @app.post("/news")
 async def news_bot(request: RequestBody):
-    """부동산 뉴스봇 - 5개 뉴스 카드 형식"""
+    """부동산 뉴스봇 - 간결한 리스트 형식 (5개)"""
     request_id = str(uuid.uuid4())
     
     logger.info("=" * 50)
@@ -476,29 +476,14 @@ async def news_bot(request: RequestBody):
                 f"(점수: {item.get('relevance_score', 0)})"
             )
         
-        # 5개 뉴스 카드 생성
-        carousel_items = []
+        # 뉴스 리스트 텍스트 생성
+        news_list = f"📰 오늘의 부동산 뉴스 (총 {len(news_items)}건)\n\n"
         
         for idx, item in enumerate(news_items, 1):
-            title = item['title']
-            description = item.get('description', '')
-            url = item['link']
+            title = item['title']  # 전체 제목 (축약 없음!)
+            url = item['link']      # 전체 URL (축약 없음!)
             
-            # 설명이 너무 길면 축약 (300자)
-            if len(description) > 300:
-                description = description[:297] + "..."
-            
-            carousel_items.append({
-                "title": title,
-                "description": description,
-                "buttons": [
-                    {
-                        "label": "원문 보기",
-                        "action": "webLink",
-                        "webLinkUrl": url
-                    }
-                ]
-            })
+            news_list += f"{idx}. {title}\n🔗 {url}\n\n"
         
         # 첫 번째 뉴스 세션에 저장 (대화 이어가기용)
         first_news = news_items[0]
@@ -512,15 +497,14 @@ async def news_bot(request: RequestBody):
         
         logger.info(f"✅ 초고속 응답 완료 (0.1초)")
         
-        # 카카오톡 응답 - Carousel (5개 뉴스 카드)
+        # 카카오톡 응답 - 간결한 리스트
         return {
             "version": "2.0",
             "template": {
                 "outputs": [
                     {
-                        "carousel": {
-                            "type": "basicCard",
-                            "items": carousel_items
+                        "simpleText": {
+                            "text": news_list.strip()
                         }
                     }
                 ]
