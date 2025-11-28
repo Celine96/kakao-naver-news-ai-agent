@@ -480,8 +480,16 @@ async def news_bot(request: RequestBody):
         news_list = f"📰 오늘의 부동산 뉴스 (총 {len(news_items)}건)\n\n"
         
         for idx, item in enumerate(news_items, 1):
-            title = item['title']
-            url = item['link']
+            title = item.get('title', '제목 없음')
+            url = item.get('link', '')
+            
+            # 디버깅: URL 확인
+            logger.info(f"   뉴스 {idx}: URL = {url[:50] if url else 'URL 없음!'}")
+            
+            # URL이 없으면 경고
+            if not url:
+                logger.warning(f"   ⚠️ 뉴스 {idx} URL 없음: {title[:30]}")
+                url = "(URL 정보 없음)"
             
             # 제목 + URL (URL을 별도 줄에 표시)
             news_list += f"{idx}. {title}\n{url}\n\n"
