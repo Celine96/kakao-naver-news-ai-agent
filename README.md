@@ -1,4 +1,4 @@
-# pycon-AI-messenger
+# pycon-AI-messenger (현재 사용중)
 
 
 
