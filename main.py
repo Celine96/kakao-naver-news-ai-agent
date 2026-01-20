@@ -1,8 +1,9 @@
 """
-REXA 카카오톡 뉴스봇 서버 (v5.0.0 - Simple)
+REXA 카카오톡 뉴스봇 서버 (v5.1.0)
 - 부동산 뉴스 제공
 - 사용자 자동 등록
 - 푸시 알림 준비
+- 사용자 질문 응답
 """
 
 import logging
@@ -38,7 +39,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="REXA - Real Estate News Bot",
     description="카카오톡 부동산 뉴스봇 + 푸시 알림",
-    version="5.0.0"
+    version="5.1.0"
 )
 
 # ================================================================================
@@ -221,12 +222,80 @@ async def news_bot(request: RequestBody):
             }
         }
 
+@app.post("/custom")
+async def custom_response(request: RequestBody):
+    """사용자 자유 텍스트 입력 응답"""
+    request_id = str(uuid.uuid4())
+    
+    logger.info("=" * 50)
+    logger.info(f"💬 Custom request: {request_id[:8]}")
+    
+    try:
+        # 요청 데이터
+        request_dict = request.model_dump()
+        
+        # 사용자 등록 (백그라운드)
+        user_id = await register_user_from_request(request_dict)
+        if user_id:
+            logger.info(f"👤 사용자: {user_id[:10]}...")
+        
+        # 사용자 메시지 추출
+        action = request_dict.get("action", {})
+        detail_params = action.get("detailParams", {})
+        prompt_dict = detail_params.get("prompt", {})
+        user_message = prompt_dict.get("value", "")
+        
+        logger.info(f"📝 사용자 메시지: {user_message[:50]}...")
+        
+        # 간단한 응답
+        response_text = """안녕하세요! REXA 부동산 뉴스봇입니다. 🏠
+
+📰 최신 부동산 뉴스를 확인하시려면 아래 '부동산 뉴스' 버튼을 눌러주세요.
+
+매일 오전 8시에 카카오톡으로 자동 푸시 알림을 받으실 수 있습니다!"""
+        
+        logger.info(f"✅ 응답 완료")
+        
+        # 카카오톡 응답
+        return {
+            "version": "2.0",
+            "template": {
+                "outputs": [
+                    {
+                        "simpleText": {
+                            "text": response_text
+                        }
+                    }
+                ],
+                "quickReplies": [
+                    {
+                        "label": "부동산 뉴스",
+                        "action": "block",
+                        "blockId": "YOUR_NEWS_BLOCK_ID"  # 카카오 비즈니스에서 설정한 블록 ID
+                    }
+                ]
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Custom response error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {
+            "version": "2.0",
+            "template": {
+                "outputs": [
+                    {"simpleText": {"text": "안녕하세요! '부동산 뉴스' 버튼을 눌러주세요."}}
+                ]
+            }
+        }
+
 @app.get("/health")
 async def health_check() -> HealthStatus:
     """Health check endpoint"""
     return HealthStatus(
         status="healthy" if server_healthy else "unhealthy",
-        version="5.0.0",
+        version="5.1.0",
         server_healthy=server_healthy,
         last_check=last_health_check.isoformat()
     )
@@ -238,7 +307,7 @@ async def health_ping():
         "alive": True,
         "healthy": server_healthy,
         "timestamp": datetime.now().isoformat(),
-        "version": "5.0.0"
+        "version": "5.1.0"
     }
 
 # ================================================================================
@@ -249,7 +318,7 @@ async def health_ping():
 async def startup_event():
     """Initialize resources on startup"""
     logger.info("=" * 70)
-    logger.info("🚀 Starting REXA News Bot Server v5.0.0")
+    logger.info("🚀 Starting REXA News Bot Server v5.1.0")
     logger.info("=" * 70)
     
     # CSV/Sheets 초기화
@@ -272,8 +341,8 @@ async def startup_event():
     
     logger.info("=" * 70)
     logger.info("✅ REXA News Bot Server started!")
-    logger.info(f"   - Version: 5.0.0 (Simple + Push)")
-    logger.info(f"   - Features: News + User Management")
+    logger.info(f"   - Version: 5.1.0 (With /custom endpoint)")
+    logger.info(f"   - Features: News + Custom Response + Push")
     logger.info("=" * 70)
 
 @app.on_event("shutdown")
