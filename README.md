@@ -1,4 +1,4 @@
-# pycon-AI-messenger (현재 사용중)
+# real estate ai new bot - naver search based (현재 사용중)
 
 
 
