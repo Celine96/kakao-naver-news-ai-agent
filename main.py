@@ -1,7 +1,5 @@
 """
-REXA 카카오톡 봇 서버
-- 사용자 요청 시 뉴스 전달
-- RAG 기반 질의응답
+REXA 카카오톡 뉴스봇 
 """
 
 import logging
