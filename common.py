@@ -1,8 +1,5 @@
 """
-REXA 공통 함수 모듈
-- 뉴스 검색/필터링
-- 크롤링
-- 저장 (CSV, Google Sheets)
+REXA 부동산 챗봇에 사용자 발화시, 뉴스 전송송
 """
 
 import logging
