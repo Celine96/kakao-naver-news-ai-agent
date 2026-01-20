@@ -48,7 +48,7 @@ services:
   - type: cron
     name: rexa-daily-news-push
     runtime: python
-    schedule: "0 23 * * *"
+    schedule: "0 6 * * *"
     buildCommand: pip install -r requirements.txt
     startCommand: python daily_push_sender.py
     envVars:
