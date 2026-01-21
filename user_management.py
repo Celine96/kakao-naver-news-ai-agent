@@ -1,6 +1,7 @@
 """
 REXA 사용자 관리 시스템
 - 사용자 ID 자동 등록
+- User Type 저장 (botUserKey)
 - Google Sheets 기반 저장
 """
 
@@ -8,7 +9,7 @@ import logging
 import os
 import json
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ except ImportError:
 # ================================================================================
 
 GOOGLE_SHEETS_CREDENTIALS = os.getenv("GOOGLE_SHEETS_CREDENTIALS")
-GOOGLE_SHEETS_USER_SHEET_ID = os.getenv("GOOGLE_SHEETS_USER_SHEET_ID")  # 사용자 관리 시트 ID
+GOOGLE_SHEETS_USER_SHEET_ID = os.getenv("GOOGLE_SHEETS_USER_SHEET_ID")
 
 # ================================================================================
 # 글로벌 변수
@@ -42,7 +43,6 @@ user_worksheet = None
 def init_user_sheets():
     """
     사용자 관리용 Google Sheets 초기화
-    뉴스 시트와 별도로 관리
     """
     global user_sheet_client, user_worksheet
     
@@ -54,7 +54,6 @@ def init_user_sheets():
         logger.error("❌ GOOGLE_SHEETS_CREDENTIALS 환경변수 없음")
         return False
     
-    # 사용자 시트 ID가 없으면 뉴스 시트 사용
     sheet_id = GOOGLE_SHEETS_USER_SHEET_ID or os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID")
     
     if not sheet_id:
@@ -89,6 +88,7 @@ def init_user_sheets():
                 user_worksheet.clear()
                 user_worksheet.insert_row([
                     'user_id',
+                    'user_type',        # botUserKey / plusfriendUserKey
                     'first_seen',
                     'last_seen',
                     'interaction_count',
@@ -99,6 +99,7 @@ def init_user_sheets():
         except:
             user_worksheet.insert_row([
                 'user_id',
+                'user_type',
                 'first_seen',
                 'last_seen',
                 'interaction_count',
@@ -117,12 +118,13 @@ def init_user_sheets():
 # 사용자 등록 및 업데이트
 # ================================================================================
 
-def register_or_update_user(user_id: str, properties: dict = None) -> bool:
+def register_or_update_user(user_id: str, user_type: str = "botUserKey", properties: dict = None) -> bool:
     """
     사용자 등록 또는 업데이트
     
     Args:
         user_id: 카카오 사용자 ID
+        user_type: "botUserKey" (기본값) 또는 "plusfriendUserKey"
         properties: 추가 속성 (선택)
     
     Returns:
@@ -154,8 +156,8 @@ def register_or_update_user(user_id: str, properties: dict = None) -> bool:
             # 기존 사용자 업데이트
             interaction_count = int(existing_user.get('interaction_count', 0)) + 1
             
-            user_worksheet.update_cell(row_index, 3, timestamp)  # last_seen
-            user_worksheet.update_cell(row_index, 4, interaction_count)  # interaction_count
+            user_worksheet.update_cell(row_index, 4, timestamp)  # last_seen
+            user_worksheet.update_cell(row_index, 5, interaction_count)  # interaction_count
             
             logger.info(f"✅ 사용자 업데이트: {user_id[:10]}... (총 {interaction_count}회)")
             
@@ -165,14 +167,15 @@ def register_or_update_user(user_id: str, properties: dict = None) -> bool:
             
             user_worksheet.append_row([
                 user_id,
-                timestamp,  # first_seen
-                timestamp,  # last_seen
-                1,  # interaction_count
-                True,  # push_enabled (기본값: 활성화)
+                user_type,      # botUserKey 저장
+                timestamp,      # first_seen
+                timestamp,      # last_seen
+                1,              # interaction_count
+                True,           # push_enabled (기본값: 활성화)
                 properties_json
             ])
             
-            logger.info(f"🆕 신규 사용자 등록: {user_id[:10]}...")
+            logger.info(f"🆕 신규 사용자 등록: {user_id[:10]}... (type: {user_type})")
         
         return True
         
@@ -184,15 +187,15 @@ def register_or_update_user(user_id: str, properties: dict = None) -> bool:
 # 사용자 목록 조회
 # ================================================================================
 
-def get_all_user_ids(push_enabled_only: bool = True) -> List[str]:
+def get_all_users(push_enabled_only: bool = True) -> List[Dict[str, str]]:
     """
-    모든 사용자 ID 조회
+    모든 사용자 정보 조회 (ID + Type)
     
     Args:
         push_enabled_only: True이면 푸시 활성화된 사용자만
     
     Returns:
-        사용자 ID 리스트
+        사용자 정보 리스트: [{"id": "user_id", "type": "botUserKey"}, ...]
     """
     
     if not user_worksheet:
@@ -204,25 +207,47 @@ def get_all_user_ids(push_enabled_only: bool = True) -> List[str]:
     try:
         all_records = user_worksheet.get_all_records()
         
-        user_ids = []
+        users = []
         for record in all_records:
             user_id = record.get('user_id')
+            user_type = record.get('user_type', 'botUserKey')  # 기본값
             push_enabled = record.get('push_enabled', True)
             
             if user_id:
                 # push_enabled_only가 True이면 푸시 활성화된 사용자만
                 if push_enabled_only:
                     if push_enabled in [True, 'TRUE', 'True', 'true', 1, '1']:
-                        user_ids.append(user_id)
+                        users.append({
+                            "id": user_id,
+                            "type": user_type
+                        })
                 else:
-                    user_ids.append(user_id)
+                    users.append({
+                        "id": user_id,
+                        "type": user_type
+                    })
         
-        logger.info(f"✅ 사용자 조회: 총 {len(user_ids)}명")
-        return user_ids
+        logger.info(f"✅ 사용자 조회: 총 {len(users)}명")
+        return users
         
     except Exception as e:
         logger.error(f"❌ 사용자 조회 실패: {e}")
         return []
+
+
+def get_all_user_ids(push_enabled_only: bool = True) -> List[str]:
+    """
+    모든 사용자 ID 조회 (하위 호환성)
+    
+    Args:
+        push_enabled_only: True이면 푸시 활성화된 사용자만
+    
+    Returns:
+        사용자 ID 리스트
+    """
+    users = get_all_users(push_enabled_only)
+    return [user["id"] for user in users]
+
 
 def get_user_info(user_id: str) -> Optional[dict]:
     """
@@ -279,7 +304,7 @@ def set_push_enabled(user_id: str, enabled: bool) -> bool:
         
         for idx, record in enumerate(all_records, 2):  # 헤더 제외
             if record.get('user_id') == user_id:
-                user_worksheet.update_cell(idx, 5, enabled)  # push_enabled 컬럼
+                user_worksheet.update_cell(idx, 6, enabled)  # push_enabled 컬럼
                 logger.info(f"✅ 푸시 설정 변경: {user_id[:10]}... → {enabled}")
                 return True
         
