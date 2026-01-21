@@ -1,8 +1,8 @@
 """
-REXA 카카오톡 뉴스봇 서버 (v5.1.0)
+REXA 카카오톡 뉴스봇 서버 (v5.2.0)
 - 부동산 뉴스 제공
-- 사용자 자동 등록
-- 푸시 알림 준비
+- 사용자 자동 등록 (user_type 포함)
+- 푸시 알림 준비 (올바른 Event API)
 - 사용자 질문 응답
 """
 
@@ -38,8 +38,8 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="REXA - Real Estate News Bot",
-    description="카카오톡 부동산 뉴스봇 + 푸시 알림",
-    version="5.1.0"
+    description="카카오톡 부동산 뉴스봇 + 푸시 알림 (Bot ID 기반)",
+    version="5.2.0"
 )
 
 # ================================================================================
@@ -96,10 +96,12 @@ async def register_user_from_request(request_body: dict) -> Optional[str]:
         
         if user_id:
             # 백그라운드로 사용자 등록
+            # user_type은 기본적으로 botUserKey
             asyncio.create_task(
                 asyncio.to_thread(
                     register_or_update_user,
                     user_id,
+                    "botUserKey",  # type 지정
                     user_info.get("properties", {})
                 )
             )
@@ -168,13 +170,6 @@ async def news_bot(request: RequestBody):
         
         logger.info(f"✅ 구글 시트 조회 완료: {len(news_items)}개")
         
-        # 로깅
-        for idx, item in enumerate(news_items, 1):
-            logger.info(
-                f"   [{idx}] {item['title'][:40]}... "
-                f"(점수: {item.get('relevance_score', 0)})"
-            )
-        
         # 뉴스 리스트 텍스트 생성
         news_list = f"📰 오늘의 부동산 뉴스 (총 {len(news_items)}건)\n\n"
         
@@ -182,15 +177,10 @@ async def news_bot(request: RequestBody):
             title = item.get('title', '제목 없음')
             url = item.get('link', '')
             
-            # 디버깅: URL 확인
-            logger.info(f"   뉴스 {idx}: URL = {url[:50] if url else 'URL 없음!'}")
-            
-            # URL이 없으면 경고
             if not url:
                 logger.warning(f"   ⚠️ 뉴스 {idx} URL 없음: {title[:30]}")
                 url = "(URL 정보 없음)"
             
-            # 제목 + URL
             news_list += f"{idx}. {title}\n{url}\n\n"
         
         logger.info(f"✅ 응답 완료")
@@ -239,14 +229,6 @@ async def custom_response(request: RequestBody):
         if user_id:
             logger.info(f"👤 사용자: {user_id[:10]}...")
         
-        # 사용자 메시지 추출
-        action = request_dict.get("action", {})
-        detail_params = action.get("detailParams", {})
-        prompt_dict = detail_params.get("prompt", {})
-        user_message = prompt_dict.get("value", "")
-        
-        logger.info(f"📝 사용자 메시지: {user_message[:50]}...")
-        
         # 간단한 응답
         response_text = """안녕하세요! REXA 부동산 뉴스봇입니다. 🏠
 
@@ -271,7 +253,7 @@ async def custom_response(request: RequestBody):
                     {
                         "label": "부동산 뉴스",
                         "action": "block",
-                        "blockId": "YOUR_NEWS_BLOCK_ID"  # 카카오 비즈니스에서 설정한 블록 ID
+                        "blockId": "YOUR_NEWS_BLOCK_ID"
                     }
                 ]
             }
@@ -295,7 +277,7 @@ async def health_check() -> HealthStatus:
     """Health check endpoint"""
     return HealthStatus(
         status="healthy" if server_healthy else "unhealthy",
-        version="5.1.0",
+        version="5.2.0",
         server_healthy=server_healthy,
         last_check=last_health_check.isoformat()
     )
@@ -307,7 +289,7 @@ async def health_ping():
         "alive": True,
         "healthy": server_healthy,
         "timestamp": datetime.now().isoformat(),
-        "version": "5.1.0"
+        "version": "5.2.0"
     }
 
 # ================================================================================
@@ -318,7 +300,7 @@ async def health_ping():
 async def startup_event():
     """Initialize resources on startup"""
     logger.info("=" * 70)
-    logger.info("🚀 Starting REXA News Bot Server v5.1.0")
+    logger.info("🚀 Starting REXA News Bot Server v5.2.0")
     logger.info("=" * 70)
     
     # CSV/Sheets 초기화
@@ -341,7 +323,7 @@ async def startup_event():
     
     logger.info("=" * 70)
     logger.info("✅ REXA News Bot Server started!")
-    logger.info(f"   - Version: 5.1.0 (With /custom endpoint)")
+    logger.info(f"   - Version: 5.2.0 (With Bot ID Event API)")
     logger.info(f"   - Features: News + Custom Response + Push")
     logger.info("=" * 70)
 
