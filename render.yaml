@@ -20,16 +20,14 @@ services:
         sync: false
       - key: KAKAO_REST_API_KEY
         sync: false
-      - key: KAKAO_EVENT_NAME
-        value: "event02"
       - key: OPENAI_API_KEY
         sync: false
 
-  # 2. 자동 크롤러 (1시간마다)
+  # 2. 자동 크롤러 (5분마다)
   - type: cron
-    name: rexa-crawler-hourly
+    name: rexa-crawler-5min
     runtime: python
-    schedule: "0 * * * *"
+    schedule: "*/5 * * * *"
     buildCommand: pip install -r requirements.txt
     startCommand: python crawler.py
     envVars:
@@ -43,20 +41,3 @@ services:
         sync: false
       - key: GOOGLE_SHEETS_SPREADSHEET_ID
         sync: false
-
-  # 3. 오전 8시 뉴스 푸시 (매일)
-  - type: cron
-    name: rexa-daily-news-push
-    runtime: python
-    schedule: "0 6 * * *"
-    buildCommand: pip install -r requirements.txt
-    startCommand: python daily_push_sender.py
-    envVars:
-      - key: GOOGLE_SHEETS_CREDENTIALS
-        sync: false
-      - key: GOOGLE_SHEETS_USER_SHEET_ID
-        sync: false
-      - key: KAKAO_REST_API_KEY
-        sync: false
-      - key: KAKAO_EVENT_NAME
-        value: "event02"
