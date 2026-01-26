@@ -124,7 +124,7 @@ async def news_bot(request: RequestBody):
                     {
                         "listCard": {
                             "header": {
-                                "title": f"📰 오늘의 부동산 뉴스 (총 {len(news_items)}건)"
+                                "title": f"📰 실시간 부동산 뉴스 ({len(news_items)}건)"
                             },
                             "items": list_items,
                             "buttons": [
