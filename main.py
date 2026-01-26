@@ -91,29 +91,49 @@ async def news_bot(request: RequestBody):
         
         logger.info(f"✅ 구글 시트 조회 완료: {len(news_items)}개")
         
-        # 뉴스 리스트 텍스트 생성
-        news_list = f"📰 오늘의 부동산 뉴스 (총 {len(news_items)}건)\n\n"
-        
+        # ListCard 형식으로 뉴스 아이템 생성
+        list_items = []
         for idx, item in enumerate(news_items, 1):
             title = item.get('title', '제목 없음')
+            description = item.get('description', '')
             url = item.get('link', '')
             
             if not url:
                 logger.warning(f"   ⚠️ 뉴스 {idx} URL 없음: {title[:30]}")
-                url = "(URL 정보 없음)"
+                url = "https://news.naver.com"  # 기본 URL
             
-            news_list += f"{idx}. {title}\n{url}\n\n"
+            # 설명이 너무 길면 잘라내기
+            if len(description) > 80:
+                description = description[:77] + "..."
+            
+            list_items.append({
+                "title": title,
+                "description": description,
+                "link": {
+                    "web": url
+                }
+            })
         
         logger.info(f"✅ 응답 완료")
         
-        # 카카오톡 응답
+        # 카카오톡 ListCard 응답
         return {
             "version": "2.0",
             "template": {
                 "outputs": [
                     {
-                        "simpleText": {
-                            "text": news_list.strip()
+                        "listCard": {
+                            "header": {
+                                "title": f"📰 오늘의 부동산 뉴스 (총 {len(news_items)}건)"
+                            },
+                            "items": list_items,
+                            "buttons": [
+                                {
+                                    "label": "전체보기",
+                                    "action": "webLink",
+                                    "webLinkUrl": "https://news.naver.com/main/list.naver?mode=LS2D&mid=shm&sid1=101&sid2=260"
+                                }
+                            ]
                         }
                     }
                 ]
