@@ -1,17 +1,13 @@
 """
-REXA 카카오톡 뉴스봇 서버 (v5.2.0)
-- 부동산 뉴스 제공
-- 사용자 자동 등록 (user_type 포함)
-- 푸시 알림 준비 (올바른 Event API)
-- 사용자 질문 응답
+REXA 카카오톡 뉴스봇 서버 (v5.3.0 - Simplified)
+- 부동산 뉴스 제공 (사용자 발화시)
+- Push 기능 제거
+- 사용자 관리 기능 제거
 """
 
 import logging
-import os
-import asyncio
 import uuid
 from datetime import datetime
-from typing import Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -22,9 +18,6 @@ from common import (
     init_google_sheets,
     init_csv_file
 )
-
-# 사용자 관리 임포트
-from user_management import register_or_update_user
 
 # ================================================================================
 # 로깅 설정
@@ -38,8 +31,8 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="REXA - Real Estate News Bot",
-    description="카카오톡 부동산 뉴스봇 + 푸시 알림 (Bot ID 기반)",
-    version="5.2.0"
+    description="카카오톡 부동산 뉴스봇 (간소화 버전)",
+    version="5.3.0"
 )
 
 # ================================================================================
@@ -60,78 +53,14 @@ class Action(BaseModel):
     params: dict
     detailParams: dict
 
-class UserInfo(BaseModel):
-    id: str
-    type: Optional[str] = None
-    properties: Optional[dict] = None
-
-class UserRequest(BaseModel):
-    user: UserInfo
-
 class RequestBody(BaseModel):
     action: Action
-    userRequest: Optional[UserRequest] = None
 
 class HealthStatus(BaseModel):
     status: str
     version: str
     server_healthy: bool
     last_check: str
-
-# ================================================================================
-# 사용자 등록 헬퍼
-# ================================================================================
-
-async def register_user_from_request(request_body: dict) -> Optional[str]:
-    """
-    요청에서 사용자 ID 추출 및 등록
-    
-    Returns:
-        user_id 또는 None
-    """
-    try:
-        user_request = request_body.get("userRequest", {})
-        user_info = user_request.get("user", {})
-        user_id = user_info.get("id")
-        
-        if user_id:
-            # 백그라운드로 사용자 등록
-            # user_type은 기본적으로 botUserKey
-            asyncio.create_task(
-                asyncio.to_thread(
-                    register_or_update_user,
-                    user_id,
-                    "botUserKey",  # type 지정
-                    user_info.get("properties", {})
-                )
-            )
-            return user_id
-        
-        return None
-        
-    except Exception as e:
-        logger.error(f"❌ 사용자 등록 오류: {e}")
-        return None
-
-# ================================================================================
-# Background Tasks
-# ================================================================================
-
-async def health_check_monitor():
-    """Monitor system health"""
-    global server_healthy, last_health_check
-    
-    while True:
-        try:
-            await asyncio.sleep(60)  # 1분마다 체크
-            
-            # 간단한 헬스 체크
-            server_healthy = True
-            last_health_check = datetime.now()
-            
-        except Exception as e:
-            logger.error(f"❌ Health check error: {e}")
-            server_healthy = False
 
 # ================================================================================
 # API 엔드포인트
@@ -146,14 +75,6 @@ async def news_bot(request: RequestBody):
     logger.info(f"📰 News bot request: {request_id[:8]}")
     
     try:
-        # 요청 데이터
-        request_dict = request.model_dump()
-        
-        # 사용자 등록 (백그라운드)
-        user_id = await register_user_from_request(request_dict)
-        if user_id:
-            logger.info(f"👤 사용자: {user_id[:10]}...")
-        
         # 구글 시트에서 최신 뉴스 5개 조회
         news_items = get_latest_news_from_gsheet(limit=5)
         
@@ -221,20 +142,10 @@ async def custom_response(request: RequestBody):
     logger.info(f"💬 Custom request: {request_id[:8]}")
     
     try:
-        # 요청 데이터
-        request_dict = request.model_dump()
-        
-        # 사용자 등록 (백그라운드)
-        user_id = await register_user_from_request(request_dict)
-        if user_id:
-            logger.info(f"👤 사용자: {user_id[:10]}...")
-        
         # 간단한 응답
         response_text = """안녕하세요! REXA 부동산 뉴스봇입니다. 🏠
 
-📰 최신 부동산 뉴스를 확인하시려면 아래 '부동산 뉴스' 버튼을 눌러주세요.
-
-매일 오전 8시에 카카오톡으로 자동 푸시 알림을 받으실 수 있습니다!"""
+📰 최신 부동산 뉴스를 확인하시려면 아래 '부동산 뉴스' 버튼을 눌러주세요."""
         
         logger.info(f"✅ 응답 완료")
         
@@ -277,7 +188,7 @@ async def health_check() -> HealthStatus:
     """Health check endpoint"""
     return HealthStatus(
         status="healthy" if server_healthy else "unhealthy",
-        version="5.2.0",
+        version="5.3.0",
         server_healthy=server_healthy,
         last_check=last_health_check.isoformat()
     )
@@ -289,7 +200,7 @@ async def health_ping():
         "alive": True,
         "healthy": server_healthy,
         "timestamp": datetime.now().isoformat(),
-        "version": "5.2.0"
+        "version": "5.3.0"
     }
 
 # ================================================================================
@@ -299,8 +210,10 @@ async def health_ping():
 @app.on_event("startup")
 async def startup_event():
     """Initialize resources on startup"""
+    global server_healthy, last_health_check
+    
     logger.info("=" * 70)
-    logger.info("🚀 Starting REXA News Bot Server v5.2.0")
+    logger.info("🚀 Starting REXA News Bot Server v5.3.0 (Simplified)")
     logger.info("=" * 70)
     
     # CSV/Sheets 초기화
@@ -312,19 +225,13 @@ async def startup_event():
     if gsheet_success:
         logger.info("✅ Google Sheets logging enabled")
     
-    # 사용자 관리 시트 초기화
-    from user_management import init_user_sheets
-    user_sheet_success = init_user_sheets()
-    if user_sheet_success:
-        logger.info("✅ User management enabled")
-    
-    # Background tasks
-    asyncio.create_task(health_check_monitor())
+    server_healthy = True
+    last_health_check = datetime.now()
     
     logger.info("=" * 70)
     logger.info("✅ REXA News Bot Server started!")
-    logger.info(f"   - Version: 5.2.0 (With Bot ID Event API)")
-    logger.info(f"   - Features: News + Custom Response + Push")
+    logger.info(f"   - Version: 5.3.0 (Simplified)")
+    logger.info(f"   - Features: News Only (No Push, No User Management)")
     logger.info("=" * 70)
 
 @app.on_event("shutdown")
